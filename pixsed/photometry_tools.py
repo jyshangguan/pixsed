@@ -178,14 +178,17 @@ class Image(object):
 
     def get_source_extend(self):
         '''
-        Get the extend source list to be masked.
+        Get the extend source list to be masked. We can consider to select 
+        segments larger than some threshold as extended sources. And extended 
+        sources will be masked differently from the point sources.
         '''
         self._source_extend = None
     
 
     def get_source_point(self):
         '''
-        Get the point source list to be masked.
+        Get the point source list to be masked. Here one can use Gaia 
+        information but no need to be limited by it.
         '''
         self._source_point = None
 
