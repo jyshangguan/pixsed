@@ -1,14 +1,27 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.wcs import WCS
-from astropy.stats import sigma_clipped_stats, mad_std
+from astropy.stats import sigma_clipped_stats, mad_std, SigmaClip
 from astropy.convolution import convolve
+from astropy.table import Table
+import astropy.units as u
+from astropy.coordinates import SkyCoord
 from photutils.isophote import Ellipse, build_ellipse_model
 from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog
-
+from photutils.background import Background2D, MedianBackground
+from photutils.detection import DAOStarFinder
+from photutils.profiles import RadialProfile, CurveOfGrowth
+from astroquery.gaia import Gaia
+from astroquery.xmatch import XMatch
+from reproject import reproject_adaptive
+from math import log, sqrt, ceil
+import random
+import extinction
+from scipy import interpolate
 from .utils import read_coordinate, plot_image
 
 import matplotlib as mpl
+
 mpl.rc("xtick", direction="in", labelsize=16)
 mpl.rc("ytick", direction="in", labelsize=16)
 mpl.rc("xtick.major", width=1., size=8)
@@ -22,7 +35,8 @@ class Image(object):
     The class of an image. For the moment, we only assume that there is one 
     science target in the image.
     '''
-    def __init__(self, data, header, wcs=None, target_coordinate=None):
+
+    def __init__(self, data, header, target_coordinate=None, psf_fwhm=None):
         '''
         Parameters
         ----------
@@ -30,13 +44,23 @@ class Image(object):
             The 2D image data.
         hearder : astropy fits header
             The header of the image data.
+        target_coordinate : Tuple. Contain two floats.
+            The Ra and Dec of the target galaxy.
+        psf_fwhm : float.
+            The fwhm of the PSF.
         '''
         self._data_org = data
         self._data = data.copy()
         self._header = header
         self._shape = data.shape
+        self._wcs = WCS(header)
 
-        self.get_wcs(wcs)
+
+        if psf_fwhm is None:
+            self.get_psf()
+        else:
+            self._psf_FWHM = psf_fwhm  # pixels
+            self._psf = None
 
         if target_coordinate is not None:
             self._ra, self._dec = target_coordinate
@@ -46,13 +70,25 @@ class Image(object):
         else:
             self._ra, self._dec, self._coord = None, None, None
 
-
-    def background_model(self):
+    def background_model(self, box_size=50, filter_size=3):
         '''
-        Generate the background model.
+        Generate the background model.Using median background method.
+        Parameter
+        ----------
+        box_size: int. The size used to calculate the local median.
+        filter_size: int. The kernel size used to smooth the background model.
+        Return
+        ----------
+        2d array. The background model.
         '''
-        self._background = None
-    
+        img = self._data.copy()
+        mask_background = self.mask_background()
+        sigma_clip = SigmaClip(sigma=3.)
+        bkg_estimator = MedianBackground()
+        bkg = Background2D(img, (box_size, box_size), mask=mask_background, filter_size=(filter_size, filter_size),
+                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+        self._background_model = bkg.background
+        return bkg.background
 
     def background_properties(self, mask_type='quick', sigma=3, maxiters=5, **kwargs):
         '''
@@ -82,59 +118,46 @@ class Image(object):
             mask = None
         elif mask_type == 'segmentation':
             if not hasattr(self, '_mask_segmentation'):
-                raise ValueError('The background mask (_mask_segmentation) is not generated! Please run mask_segmentation()!')
+                raise ValueError(
+                    'The background mask (_mask_segmentation) is not generated! Please run mask_segmentation()!')
             else:
                 mask = self._mask_segmentation
         else:
             if not hasattr(self, '_mask_background'):
-                raise ValueError('The background mask (_mask_background) is not generated! Please run mask_background()!')
+                raise ValueError(
+                    'The background mask (_mask_background) is not generated! Please run mask_background()!')
 
             if not hasattr(self, '_mask_target'):
                 raise ValueError('The target mask (_mask_target) is not generated! Please run mask_target()!')
 
-            mask = self._mask_background & self._mask_target
+            mask = self._mask_background
 
         res = sigma_clipped_stats(self._data, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-
-    def background_subtract(self, method='median'):
+    def background_subtract(self, method='full'):
         '''
         Remove the background of the image data.
+        Parameter
+        ----------
+        method: str.If the method is 'simple', the function just uses the median of the image to do the subtraction.
+                    If the method is 'full', the function  uses the background model to do the subtraction.
+        Return
+        ----------
+        2d array. The image after background subtraction.
         '''
-        if method == 'median':
+        self._data_subbkg = self._data.copy()
+        if method == 'simple':
             assert hasattr(self, '_bkg_median'), 'Please run background_properties() first!'
-            self._data -= self._bkg_median
-        else:
-            assert hasattr(self, '_background'), 'Please run background_model() first!'
-            self._data -= self._background
+            self._data_subbkg -= self._bkg_median
+        elif method == 'full':
+            assert hasattr(self, '_background_model'), 'Please run background_model() first!'
+            self._data_subbkg -= self._background_model
+        return self._data_subbkg
 
 
-    def coord_world_to_pixel(self, *args, **kwargs):
-        """
-        Convert the wcs to pixel coordinates.
-        """
-        assert not self._wcs is None
-        return self._wcs.world_to_pixel(*args, **kwargs)
-
-
-    def coord_pixel_to_world(self, *args, **kwargs):
-        """
-        Convert the pixel to wcs coordinates.
-        """
-        assert not self._wcs is None
-        return self._wcs.pixel_to_world(*args, **kwargs)
-
-
-    def detect_daofinder(self):
-        '''
-        Detect the source
-        '''
-        self._sources_daofinder = None
-
-
-    def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10, 
+    def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10,
                             deblend=False, nlevels=32, contrast=0.001,
                             progress_bar=False):
         '''
@@ -156,56 +179,61 @@ class Image(object):
         segment_map = detect_sources(convolved_data, threshold, npixels=npixels)
 
         if deblend:
-            self._segmentation = deblend_sources(convolved_data, segment_map, npixels=npixels, 
+            self._segmentation = deblend_sources(convolved_data, segment_map, npixels=npixels,
                                                  nlevels=nlevels, contrast=contrast, progress_bar=progress_bar)
         else:
             self._segmentation = segment_map
 
-        self._sources_segmentation = SourceCatalog(self._data, self._segmentation, convolved_data=convolved_data)
+        self._sources_segmentation = SourceCatalog(self._data, self._segmentation,
+                                                   convolved_data=convolved_data)
 
+    def get_source_galaxyarea(self, detect_thres=20., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
+                              xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33):
+        '''
+        Get the foreground stars that overlap with the target galaxy. Use Gaia xmatch to make sure that the all the
+        stars in the list are foreground stars (not a structure of the target galaxy or something).
+        These sources will have an influence on the measurement,so they should be picked out separately.
+        Parameter
+        -----------
+        detect_thres: float. The threshold for DAOFinder.
+        xmatch_radius: float. The xmatch radius. arcsec.
+        xmatch_table: str. The Gaia ctalog table used for xmatch.
+        xmatch_gmag: float. The max G band magnitude of the stars which will be picked out.
+        xmatch_distance: float. The max distance of the stars which will be picked out. kpc.
+        xmatch_plxerror: float. The max rate of the error of parallax over the parallax.
+        Return
+        ---------
+        A table contains Ra, Dec, and Gmag.
+        '''
+        assert hasattr(self, '_mask_background'), 'Please run mask_background() first!'
+        assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
+        # initial detection
+        mask_galaxy = self._mask_galaxy
+        mask = mask_galaxy == False
+        daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_FWHM)
+        sources = daofind(self._data_subbkg, mask=mask)
+        # Gaia Xmatch
+        w = self._wcs
+        sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
+        for i in range(len(sources)):
+            sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
+            sources_world.add_row([sky.ra, sky.dec])
+        t_o = XMatch.query(cat1=sources_world,
+                           cat2=xmatch_table,
+                           max_distance=xmatch_radius * u.arcsec, colRA1='Ra', colDec1='Dec')  # Gaia xmatch.
+        front_stars_set = set()
+        for i in range(len(t_o)):  # Use some standards to judge, cleaning out the fake detections.
+            if t_o['Plx'][i] != '--' and t_o['Plx'][i] > 0. and t_o['Gmag'][i] < xmatch_gmag:
+                if 1 / t_o['Plx'][i] < xmatch_distance and t_o['e_Plx'][i] < xmatch_plxerror * t_o['Plx'][i]:
+                    front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
 
-    def get_source_list(self, method='daofinder'):
-        '''
-        Get the source coordinate list.
+        front_stars_list = list(front_stars_set)
+        front_stars_world = Table(names=['Ra', 'Dec', 'Gmag'])  # Build up the final foreground stars table.
+        for j in range(len(front_stars_set)):
+            front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2]])
 
-        Parameters
-        ----------
-        method : string (default: 'daofinder')
-            Select the detection method.
-        '''
-        self._source_list = None
-    
-
-    def get_source_extend(self):
-        '''
-        Get the extend source list to be masked. We can consider to select 
-        segments larger than some threshold as extended sources. And extended 
-        sources will be masked differently from the point sources.
-        '''
-        self._source_extend = None
-    
-
-    def get_source_point(self):
-        '''
-        Get the point source list to be masked. Here one can use Gaia 
-        information but no need to be limited by it.
-        '''
-        self._source_point = None
-
-
-    def get_wcs(self, wcs=None):
-        '''
-        Get the WCS information.
-
-        Parameters
-        ----------
-        wcs : WCS or HEADER
-            The wcs information.
-        '''
-        if wcs is None:
-            self._wcs = WCS(self._header)
-        else:
-            self._wcs = wcs
+        self._source_galaxyarea = front_stars_world
+        return front_stars_world
 
 
     def get_isophote(self, plot=False):
@@ -221,64 +249,189 @@ class Image(object):
         self._isolist = None
         self._ellipse_model = None
 
-
-    def get_psf(self, plot=False):
+    def get_psf(self, method='direct', plot=False):
         '''
         Get the PSF model. (May include other properties of the PSF.)
         
         Parameters
         ----------
+        method: str
+            if method is 'direct', it will get the psf fwhm directly from the Clark's paper.
         plot : bool (default: False)
             Plot the information to show the psf building procedure.
         '''
-        self._psf = None  # PSF image
-        self._psf_FWHM = None  # PSF FWHM
+        if method == 'direct':
+            str_wavelength = self._header['WVLNGTH'].split()[0]
+            telescope = self._header['TELESCOP'].split()[0]
+            dictionary = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
+                'GALAX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5, 3)},
+                'SDSS': {'355.1nm': (0.3551, 4.5, 1.3), '468.6nm': (0.4686, 4.5, 1.3), '616.6nm': (0.6166, 4.5, 1.3),
+                         '748.0nm': (0.7480, 4.5, 1.3), '893.2nm': (0.8932, 4.5, 1.3)},
+                '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
+                'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
+                         '22um': (22., 1.375, 12)}
+            }
+            self._psf_FWHM = dictionary[telescope][str_wavelength][2] / dictionary[telescope][str_wavelength][
+                1]  # pixels
+            self._psf = None
 
-
-    def get_radial_profile(self, plot=False):
+    def get_radial_profile(self, data, ra_max, step=1., mask=None, kind = 'linear', plot=False):
         '''
         Get the radial surface bright profile of the target.
 
         Parameters
         ----------
+        data: 2d array
+            The data needs to be measured.
+        ra_max: float.
+            The max radius for measurement.
+        step: float. optional.
+            The step length for measurement.
+        mask: 2d array. Containing bool. optional.
+            The mask for measurement.
+        kind: str. optional.
+            The method for smoothing the curve. ('linear', 'cubic' ...)
         plot : bool (default: False)
             Plot the radial profile.
         '''
-        self._rp = None
+        min_radius = 0.0
+        max_radius = ra_max
+        radius_step = step
+        rp = RadialProfile(data, self._coord_pix, min_radius, max_radius, radius_step,
+                           error=None, mask=mask)
+        x = rp.radius
+        y = rp.profile
+        self._rp= interpolate.interp1d(x, y, kind=kind)
 
         if plot:
             self._rp.plot()
 
-
     def mask_background(self):
         '''
-        Get the mask of the background. (Final method)
+        Get the mask of the target galaxy and all the sources on the background.
+        Parameter
+        ----------
+        Return
+        ----------
+        The background mask.
         '''
-        mask_point = self.mask_background_point()
-        mask_extend = self.mask_background_extend()
-        self._mask_background = mask_point & mask_extend
-    
+        mask_stars = self._mask_stars
+        mask_galaxy = self._mask_galaxy
+        self._mask_background = mask_stars + mask_galaxy
+        return (mask_stars + mask_galaxy)
 
-    def mask_background_extend(self):
+    def mask_galaxy(self, thres=0.3, iter=3, kernel_fwhm=10., kernel_size=11, expand=0.01):
         '''
-        Get the mask of the background extend sources.
+        Get the mask of the target galaxy.
+        Assuming that there is only one target object on the background.
+        If the coord of the object is None, then the target which has the largest
+        area will be taken into consideration.
+        Parameter
+        ----------
+        thres: float.
+            The threshold of the segmentation.
+        iter: int.
+            The number of times to convolve the extension mask.
+        kernel_fwhm: float.
+            The fwhm of the convolution kernel.
+        kernel_size: int.
+            The size of the convolution kernel.
+        expand: float.
+            The smaller, the more expansive. Should be less than 1.0 .
+        Return
+        ----------
+        The galaxy mask.
         '''
-        return 
+        mea, med, std = self._data.background_properties()
+        img_sub = self._data - med
+        img_sub.detect_segmentation(thres * std, fwhm=3.)
+        segment_map = self._segmentation
+        sources_tb = self._sources_segmentation.to_table()
+        if self._coord:
+            x, y = self._coord_pix
+            label = segment_map.data[x, y]
+        else:
+            max_area = 0.
+            label = 0
+            for i in range(len(sources_tb)):
+                if sources_tb[i]['area'] > max_area:
+                    max_area = sources_tb[i]['area']
+                    label = sources_tb[i]['label']
+        mask_galaxy = segment_map == label
+        kernel_galaxy = make_2dgaussian_kernel(kernel_fwhm, size=kernel_size)
+        for i in range(iter):
+            mask_galaxy = convolve(mask_galaxy, kernel_galaxy)
+        mask_galaxy = mask_galaxy > expand
+        self._mask_galaxy = mask_galaxy
+        self._segmentation = None
+        self._sources_segmentation = None
+        return mask_galaxy
 
-
-    def mask_background_point(self):
+    def mask_stars(self, thres=4., thres_area=1000, iter_point=5, iter_extend=5, kernel_fwhm_point=7.,
+                   kernel_size_point=7,
+                   kernel_fwhm_extend=20., kernel_size_extend=21, expand_point=0.001, expand_extend=0.001):
         '''
-        Get the mask of the background point sources.
+        Get the mask of the background stars sources, including the expansive stars as well as the point stars.
+        Parameter
+        ----------
+        thres: float.
+            The threshold of the segmentation.
+        thres_area: int.
+            The threshold area between point sources and extensive sources.
+        iter_point: int.
+            The number of times to convolve the point stars mask.
+        iter_extend: int.
+            The number of times to convolve the expansive stars mask.
+        kernel_fwhm_point: float.
+            The fwhm of the convolution kernel for point sources.
+        kernel_size_point: int.
+            The size of the convolution kernel for point sources.
+        kernel_fwhm_point: float.
+            The fwhm of the convolution kernel for extensive sources.
+        kernel_size_point: int.
+            The size of the convolution kernel for extensive sources.
+        expand: float.
+            The smaller, the more expansive. Should be less than 1.0 .
+        Return
+        ----------
+        The stars mask.
         '''
-        return 
+        assert hasattr(self, '_mask_galaxy'), 'Please run mask_galaxy() first!'
+        galaxy_mask = self._mask_galaxy
+        mea, med, std = self._data.background_properties()
+        img_sub = self._data - med
+        img_sub.detect_segmentation(thres * std, fwhm=self._psf_FWHM, npixels=12, connectivity=4,
+                                    mask=galaxy_mask)
+        sources_tb = self._sources_segmentation.to_table()
+        segment_map = self._segmentation
+        extend_label = []
+        point_label = []
+        for i in range(len(sources_tb)):
+            if sources_tb[i]['area'].value >= thres_area:
+                extend_label.append(sources_tb[i]['label'])
+            else:
+                point_label.append(sources_tb[i]['label'])
+        mask_extend = np.zeros(self._shape, dtype=bool)
+        mask_point = np.zeros(self._shape, dtype=bool)
+        for i in extend_label:
+            mask_extend = mask_extend + (segment_map.data == i)
+        mask_point = segment_map.data != 0
+        kernel_point = make_2dgaussian_kernel(kernel_fwhm_point, size=kernel_size_point)
+        kernel_extend = make_2dgaussian_kernel(kernel_fwhm_extend, size=kernel_size_extend)
 
+        for i in range(iter_extend):
+            mask_extend = convolve(mask_extend, kernel_extend)
+        mask_extend = mask_extend > expand_extend
 
-    def mask_background_simple(self):
-        '''
-        Get the mask of the background sources with the current simple mehtod.
-        '''
-        self._mask_background = None
+        for i in range(iter_point):
+            mask_point = convolve(mask_point, kernel_point)
+        mask_point = mask_point > expand_point
 
+        mask_stars = mask_point + mask_extend
+        self._mask_stars = mask_stars
+        self._segmentation = None
+        self._sources_segmentation = None
+        return mask_stars
 
     def mask_segmentation(self, kernel_fwhm=None, kernel_size=5):
         '''
@@ -289,24 +442,15 @@ class Image(object):
         if kernel_fwhm is None:
             self._mask_segmentation = mask
         else:
-            kernel_size = max([kernel_size, 2*kernel_fwhm+1])
+            kernel_size = max([kernel_size, 2 * kernel_fwhm + 1])
             kernel = make_2dgaussian_kernel(fwhm=kernel_fwhm, size=kernel_size)
             self._mask_segmentation = convolve(mask, kernel) > 0.1
-
 
     def mask_target_isophote(self):
         '''
         Get the mask of the target based on the source isophote.
         '''
         self._mask_target = None
-
-
-    def mask_target_simple(self):
-        '''
-        Get the mask of the target with the current simple method.
-        '''
-        self._mask_target = None
-
 
     def plot_data(self, ax=None, percentile=99.5, vmin=None, vmax=None, stretch=None,
                   origin='lower', cmap='gray_r', show_target=True, **kwargs):
@@ -343,11 +487,10 @@ class Image(object):
         """
         ax = plot_image(self._data, ax=ax, percentile=percentile, vmin=vmin, vmax=vmax, stretch=stretch,
                         origin=origin, cmap=cmap, **kwargs)
-        
+
         if show_target:
             ax.plot(self._coord_pix[0], self._coord_pix[1], marker='+', color='r', ms=10)
         return ax
-
 
     def plot_segmentation(self, ax=None):
         '''
@@ -355,16 +498,77 @@ class Image(object):
         '''
         if ax is None:
             fig, ax = plt.subplots(figsize=(7, 7))
-        
+
         ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
         return ax
 
+    def remove_sources_simple(self, length, catalog=None):
+        '''
+        Remove the contaminating sources in the image. Should run mask_stars() first.
+        Parameter
+        -----------
+        length: int.The length of the local box used for estimating the local background.
+        catalog: table. The world coorde of the stars that overlap with the target galaxy.
+        Return
+        -----------
+        2d array. The cleaned image.
+        '''
+        assert hasattr(self, '_bkg_median'), 'Please run background_properties() first!'
+        assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
+        assert hasattr(self, '_mask_stars'), 'Please run mask_stars() first!'
+        assert hasattr(self, '_sources_galaxyarea'), 'Please run get_sources_galaxyarea() first!'
+        image_cleaned = self._data_subbkg.copy()
+        fwhm = self._psf_FWHM
+        # clean stars on the background.
+        x_len = self._shape[0]
+        y_len = self._shape[1]
+        for xc in range(x_len):
+            for yc in range(y_len):
+                if self._mask_stars[xc][yc]:
+                    image_cleaned[xc][yc] = random.gauss(self._bkg_mean, self._bkg_std)
+        # clean stars that overlap with the target galaxy.
+        if catalog is None:
+            cat_world = self._source_galaxyarea
+        else:
+            cat_world = catalog
+        w = self._wcs
+        for i in range(len(cat_world)):
+            sky = SkyCoord(cat_world['Ra'][i], cat_world['Dec'][i], frame='icrs', unit='deg')
+            x, y = w.world_to_pixel(sky)
+            xc, yc = int(x), int(y)
+            if ((xc - length <= 0) or (yc - length <= 0)) or (
+                    (xc + 2 * length >= np.shape(image_cleaned)[0]) or (yc + 2 * length >= np.shape(image_cleaned)[1])):
+                continue
+            sample = image_cleaned[yc - length:yc + length + 1, xc - length:xc + length + 1]
+            mea_sample, med_sample, std_sample = sigma_clipped_stats(sample, maxiters=20)
+            min_radius = 0.0
+            max_radius = length
+            radius_step = 1.0
+            rp = RadialProfile(image_cleaned, (xc, yc), min_radius, max_radius, radius_step)
+            h = rp.profile
+            r = rp.radius
+            flag = True
+            clean_ra = 0
+            for d in range(int(fwhm), len(h)):
+                if (h[d] < mea_sample + 3 * std_sample) and flag:
+                    clean_ra = int(r[d])
+                    flag = False
+            clean_ra = max(clean_ra, int(5 * fwhm))
+            clean_ra = min(clean_ra, int(10 * fwhm))
+            big_ra = 2 * clean_ra
+            big_ap = []
+            for a in range(-big_ra, big_ra + 1):
+                for b in range(-big_ra, big_ra + 1):
+                    if big_ra > sqrt(a ** 2 + b ** 2) > clean_ra:
+                        big_ap.append(image_cleaned[yc + b, xc + a])
+            mea_big_ap, med_big_ap, std_big_ap = sigma_clipped_stats(np.array(big_ap))
+            for a in range(-clean_ra, clean_ra + 1):
+                for b in range(-clean_ra, clean_ra + 1):
+                    if sqrt(a ** 2 + b ** 2) <= clean_ra:
+                        image_cleaned[yc + b, xc + a] = random.gauss(mea_big_ap, std_big_ap)
 
-    def remove_sources(self):
-        '''
-        Remove the contaminating sources in the image.
-        '''
-        self._image_cleaned = None
+        self._image_cleaned = image_cleaned
+        return image_cleaned
 
 
 class Atlas(object):
@@ -372,6 +576,7 @@ class Atlas(object):
     An atlas of images. Again, for the moment, we assume that there is only one 
     science target in each image.
     '''
+
     def __init__(self, image_list):
         '''
         Parameters
@@ -380,12 +585,128 @@ class Atlas(object):
             A list of Images
         '''
         self._image_list = image_list
+        self._dict = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
+            'GALAX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5, 3)},
+            'SDSS': {'355.1nm': (0.3551, 4.5, 1.3), '468.6nm': (0.4686, 4.5, 1.3), '616.6nm': (0.6166, 4.5, 1.3),
+                     '748.0nm': (0.7480, 4.5, 1.3), '893.2nm': (0.8932, 4.5, 1.3)},
+            '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
+            'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
+                     '22um': (22., 1.375, 12)}
+        }
 
-    def match_images(self):
+    def match_images(self, match_header=None):
         '''
         Get a new list of images with matched resolution, pixel scale, and size.
+        Parameter
+        -----------
+        match_header: optional
+            If 'None', it will use the 2MASS header to match.
+        Return
+        ---------
+        a list
+        Containing a series of 2d array.
         '''
-        self._image_list_mathced = None
+        # match resolution
+        img_list = self._image_list
+        dict = self._dict
+        new_img_list = [i._image_cleaned for i in img_list]
+        header_list = [i._header for i in self._image_list]
+        fwhm_list = []
+        pixel_size = []
+        wavelength = []
+        for i in range(len(img_list)):
+            telescope = header_list[i]['TELESCOP'].split()[0]
+            str_wavelength = header_list[i]['WVLNGTH'].split()[0]
+            fwhm_list.append(dict[telescope][str_wavelength][2])
+            pixel_size.append(dict[telescope][str_wavelength][1])
+            wavelength.append(dict[telescope][str_wavelength][0])
+        sigma_list = [i / (2 * sqrt(2 * log(2))) for i in fwhm_list]
+        sigma_kernel = [sqrt(max(sigma_list) ** 2 - sigma_list[i] ** 2) for i in range(len(sigma_list))]
+        sigma_kernel_pixel = [sigma_kernel[i] / pixel_size[i] for i in range(len(sigma_kernel))]
+        conv_img_list = []
+        fwhm_pixel = [fwhm_list[i] / pixel_size[i] for i in range(len(fwhm_list))]
+        size = []
+        for i in range(len(sigma_kernel_pixel)):
+            if ceil(sigma_kernel_pixel[i]) % 2 == 0:
+                size.append(ceil(sigma_kernel_pixel[i]) + 1)
+            else:
+                size.append(ceil(sigma_kernel_pixel[i]))
+        for i in range(len(new_img_list)):
+            if sigma_kernel[i] == 0:
+                conv_img_list.append(new_img_list[i])
+                continue
+            kernel = make_2dgaussian_kernel((2 * sqrt(2 * log(2))) * sigma_kernel_pixel[i], size=3 * size[i])
+            convolved_data = convolve(new_img_list[i], kernel)
+            conv_img_list.append(convolved_data)
+        # reproject
+        if not match_header:
+            for header in header_list:
+                if header['TELESCOP'] == "2MASS" and header['WVLNGTH'].split()[0] == '2.16um':
+                    match_header = header
+                    break
+        else:
+            match_header = match_header
+        rpj_img_list = []
+        for i in range(len(conv_img_list)):
+            array, _ = reproject_adaptive((conv_img_list[i], WCS(header_list[i])),
+                                          WCS(match_header), shape_out=np.shape(img_list[9]),
+                                          kernel='gaussian', conserve_flux=True, boundary_mode='ignore')
+            rpj_img_list.append(array)
+
+        self._image_list_mathced = rpj_img_list
+        self._header = match_header
+        self._wavelength = wavelength
+        return rpj_img_list
+
+    def get_target_coord_pix(self):
+        '''
+        Get the pixel coord of the target galaxy using the current header.
+        '''
+        w = WCS(self._header)
+        xc, yc = w.world_to_pixel(self._image_list[0]._coord)
+        self._target_coord_pix = xc, yc
+        self._target_coord = self._image_list[0]._coord
+        return xc, yc
+
+    def circular_measurement(self, radius, a_v, gala_extinction=True):
+        '''
+        Do the circular measurement.
+        radius: list
+            A list containing different aperture radius for the measurement. 'asec'
+        a_v: float.
+            The a_v for galactic extinction.
+        gala_extinction: bool
+            If True, it will do the galactic extinction correction.
+        Return
+        ----------
+        A dictionary.
+        Containing the multi-band flux under different aperture size.
+        '''
+        wavelength = self._wavelength
+        ra = [i / (abs(self._header['CDELT1']) * 3600.) for i in radius]
+        xc, yc = self.get_target_coord_pix()
+        dict = {}
+        for i in radius:
+            dict[i] = {}
+        for i in range(len(wavelength)):
+            ra_max = max(ra)
+            min_radius = 0.0
+            max_radius = ra_max + 1
+            radius_step = 1.0
+            cog = CurveOfGrowth(self._image_list_mathced, (xc, yc), min_radius, max_radius, radius_step)
+            h = cog.profile
+            r = cog.radius
+            flux = interpolate.interp1d(r, h)
+            for j in range(len(ra)):
+                if gala_extinction:
+                    a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
+                    a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
+                    dict[radius[j]][wavelength[i]] = flux(ra[j]) * a_list_flux[i]
+                else:
+                    dict[radius[j]][wavelength[i]] = flux(ra[j])
+        self._circular_measurement = dict
+        return dict
+
 
     def __getitem__(self, items):
         '''
@@ -395,4 +716,3 @@ class Atlas(object):
             return self._image_list_mathced[items]
         else:
             return self._image_list[items]
-
