@@ -6,11 +6,13 @@ from astropy.convolution import convolve
 from astropy.table import Table
 import astropy.units as u
 from astropy.coordinates import SkyCoord
+from astropy.visualization import simple_norm
 from photutils.isophote import Ellipse, build_ellipse_model
 from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile, CurveOfGrowth
+from photutils.aperture import CircularAperture
 from astroquery.gaia import Gaia
 from astroquery.xmatch import XMatch
 from reproject import reproject_adaptive
@@ -18,7 +20,7 @@ from math import log, sqrt, ceil
 import random
 import extinction
 from scipy import interpolate
-from .utils import read_coordinate, plot_image
+from utils import read_coordinate, plot_image
 
 import matplotlib as mpl
 
@@ -55,7 +57,6 @@ class Image(object):
         self._shape = data.shape
         self._wcs = WCS(header)
 
-
         if psf_fwhm is None:
             self.get_psf()
         else:
@@ -63,9 +64,10 @@ class Image(object):
             self._psf = None
 
         if target_coordinate is not None:
+            w = self._wcs
             self._ra, self._dec = target_coordinate
             self._coord = read_coordinate(self._ra, self._dec)
-            ra_pix, dec_pix = self.coord_world_to_pixel(self._coord)
+            ra_pix, dec_pix = w.world_to_pixel(self._coord)
             self._coord_pix = (float(ra_pix), float(dec_pix))
         else:
             self._ra, self._dec, self._coord = None, None, None
@@ -126,10 +128,6 @@ class Image(object):
             if not hasattr(self, '_mask_background'):
                 raise ValueError(
                     'The background mask (_mask_background) is not generated! Please run mask_background()!')
-
-            if not hasattr(self, '_mask_target'):
-                raise ValueError('The target mask (_mask_target) is not generated! Please run mask_target()!')
-
             mask = self._mask_background
 
         res = sigma_clipped_stats(self._data, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
@@ -155,7 +153,6 @@ class Image(object):
             assert hasattr(self, '_background_model'), 'Please run background_model() first!'
             self._data_subbkg -= self._background_model
         return self._data_subbkg
-
 
     def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10,
                             deblend=False, nlevels=32, contrast=0.001,
@@ -187,8 +184,9 @@ class Image(object):
         self._sources_segmentation = SourceCatalog(self._data, self._segmentation,
                                                    convolved_data=convolved_data)
 
-    def get_source_galaxyarea(self, detect_thres=20., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                              xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33):
+    def get_sources_galaxyarea(self, detect_thres=20., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
+                               xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
+                               xlim=False, ylim=False):
         '''
         Get the foreground stars that overlap with the target galaxy. Use Gaia xmatch to make sure that the all the
         stars in the list are foreground stars (not a structure of the target galaxy or something).
@@ -232,9 +230,23 @@ class Image(object):
         for j in range(len(front_stars_set)):
             front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2]])
 
-        self._source_galaxyarea = front_stars_world
-        return front_stars_world
+        if plot:
+            plot_tb = Table(names=['x', 'y'])
+            for i in range(len(front_stars_world)):
+                plot_sky_coord = SkyCoord(front_stars_world[i]['Ra'], front_stars_world[i]['Dec'], unit='deg')
+                plot_x, plot_y = w.world_to_pixel(plot_sky_coord)
+                plot_tb.add_row([plot_x, plot_y])
+            positions = np.transpose((plot_tb['x'], plot_tb['y']))
+            apertures = CircularAperture(positions, r=4.0)
+            norm = simple_norm(self._data_subbkg, stretch='asinh', percent=percent)
+            plt.imshow(self._data_subbkg, cmap='gray', origin='lower', norm=norm)
+            apertures.plot(color='blue', lw=5, alpha=0.5)
+            if xlim and ylim:
+                plt.xlim(xlim[0], xlim[1])
+                plt.ylim(ylim[0], ylim[1])
 
+        self._sources_galaxyarea = front_stars_world
+        return front_stars_world
 
     def get_isophote(self, plot=False):
         '''
@@ -264,9 +276,9 @@ class Image(object):
             str_wavelength = self._header['WVLNGTH'].split()[0]
             telescope = self._header['TELESCOP'].split()[0]
             dictionary = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
-                'GALAX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5, 3)},
-                'SDSS': {'355.1nm': (0.3551, 4.5, 1.3), '468.6nm': (0.4686, 4.5, 1.3), '616.6nm': (0.6166, 4.5, 1.3),
-                         '748.0nm': (0.7480, 4.5, 1.3), '893.2nm': (0.8932, 4.5, 1.3)},
+                'GALAX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5.3)},
+                'SDSS': {'355.1nm': (0.3551, 0.45, 1.3), '468.6nm': (0.4686, 0.45, 1.3), '616.6nm': (0.6166, 0.45, 1.3),
+                         '748.0nm': (0.7480, 0.45, 1.3), '893.2nm': (0.8932, 0.45, 1.3)},
                 '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
                 'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
                          '22um': (22., 1.375, 12)}
@@ -275,7 +287,7 @@ class Image(object):
                 1]  # pixels
             self._psf = None
 
-    def get_radial_profile(self, data, ra_max, step=1., mask=None, kind = 'linear', plot=False):
+    def get_radial_profile(self, data, ra_max, step=1., mask=None, kind='linear', plot=False):
         '''
         Get the radial surface bright profile of the target.
 
@@ -301,7 +313,7 @@ class Image(object):
                            error=None, mask=mask)
         x = rp.radius
         y = rp.profile
-        self._rp= interpolate.interp1d(x, y, kind=kind)
+        self._rp = interpolate.interp1d(x, y, kind=kind)
 
         if plot:
             self._rp.plot()
@@ -342,13 +354,15 @@ class Image(object):
         ----------
         The galaxy mask.
         '''
-        mea, med, std = self._data.background_properties()
+        mea, med, std = self.background_properties()
         img_sub = self._data - med
-        img_sub.detect_segmentation(thres * std, fwhm=3.)
-        segment_map = self._segmentation
-        sources_tb = self._sources_segmentation.to_table()
+        kernel = make_2dgaussian_kernel(fwhm=3., size=5)  # FWHM = 3.0
+        convolved_data = convolve(img_sub, kernel)
+        segment_map = detect_sources(convolved_data, thres * std, npixels=12)
+        cat = SourceCatalog(img_sub, segment_map, convolved_data=convolved_data)
+        sources_tb = cat.to_table()
         if self._coord:
-            x, y = self._coord_pix
+            x, y = [int(i) for i in self._coord_pix]
             label = segment_map.data[x, y]
         else:
             max_area = 0.
@@ -363,8 +377,6 @@ class Image(object):
             mask_galaxy = convolve(mask_galaxy, kernel_galaxy)
         mask_galaxy = mask_galaxy > expand
         self._mask_galaxy = mask_galaxy
-        self._segmentation = None
-        self._sources_segmentation = None
         return mask_galaxy
 
     def mask_stars(self, thres=4., thres_area=1000, iter_point=5, iter_extend=5, kernel_fwhm_point=7.,
@@ -398,12 +410,14 @@ class Image(object):
         '''
         assert hasattr(self, '_mask_galaxy'), 'Please run mask_galaxy() first!'
         galaxy_mask = self._mask_galaxy
-        mea, med, std = self._data.background_properties()
+        mea, med, std = self._bkg_mean, self._bkg_median, self._bkg_std
         img_sub = self._data - med
-        img_sub.detect_segmentation(thres * std, fwhm=self._psf_FWHM, npixels=12, connectivity=4,
-                                    mask=galaxy_mask)
-        sources_tb = self._sources_segmentation.to_table()
-        segment_map = self._segmentation
+
+        kernel = make_2dgaussian_kernel(fwhm=2 * self._psf_FWHM, size=5)
+        convolved_data = convolve(img_sub, kernel)
+        segment_map = detect_sources(convolved_data, thres * std, npixels=12, mask=galaxy_mask)
+        cat = SourceCatalog(img_sub, segment_map, convolved_data=convolved_data)
+        sources_tb = cat.to_table()
         extend_label = []
         point_label = []
         for i in range(len(sources_tb)):
@@ -429,8 +443,6 @@ class Image(object):
 
         mask_stars = mask_point + mask_extend
         self._mask_stars = mask_stars
-        self._segmentation = None
-        self._sources_segmentation = None
         return mask_stars
 
     def mask_segmentation(self, kernel_fwhm=None, kernel_size=5):
@@ -522,13 +534,14 @@ class Image(object):
         # clean stars on the background.
         x_len = self._shape[0]
         y_len = self._shape[1]
+        new_bkg_mea, new_bkg_med, new_bkg_std = sigma_clipped_stats(self._data_subbkg, mask=self._mask_background)
         for xc in range(x_len):
             for yc in range(y_len):
-                if self._mask_stars[xc][yc]:
-                    image_cleaned[xc][yc] = random.gauss(self._bkg_mean, self._bkg_std)
+                if self._mask_stars[xc, yc]:
+                    image_cleaned[xc, yc] = random.gauss(new_bkg_mea, new_bkg_std)
         # clean stars that overlap with the target galaxy.
         if catalog is None:
-            cat_world = self._source_galaxyarea
+            cat_world = self._sources_galaxyarea
         else:
             cat_world = catalog
         w = self._wcs
@@ -540,7 +553,12 @@ class Image(object):
                     (xc + 2 * length >= np.shape(image_cleaned)[0]) or (yc + 2 * length >= np.shape(image_cleaned)[1])):
                 continue
             sample = image_cleaned[yc - length:yc + length + 1, xc - length:xc + length + 1]
-            mea_sample, med_sample, std_sample = sigma_clipped_stats(sample, maxiters=20)
+            mask_sample = np.zeros(np.shape(sample), dtype='bool')
+            for a in range(-int(length / 3), int(length / 3) + 1):
+                for b in range(-int(length / 3), int(length / 3) + 1):
+                    if sqrt(a ** 2 + b ** 2) <= length / 3:
+                        mask_sample[length + a, length + b] = True
+            mea_sample, med_sample, std_sample = sigma_clipped_stats(sample, maxiters=20, mask=mask_sample)
             min_radius = 0.0
             max_radius = length
             radius_step = 1.0
@@ -553,8 +571,8 @@ class Image(object):
                 if (h[d] < mea_sample + 3 * std_sample) and flag:
                     clean_ra = int(r[d])
                     flag = False
-            clean_ra = max(clean_ra, int(5 * fwhm))
-            clean_ra = min(clean_ra, int(10 * fwhm))
+            if clean_ra == 0 or clean_ra > 8 * fwhm:
+                clean_ra = int(2 * fwhm)
             big_ra = 2 * clean_ra
             big_ap = []
             for a in range(-big_ra, big_ra + 1):
@@ -568,7 +586,6 @@ class Image(object):
                         image_cleaned[yc + b, xc + a] = random.gauss(mea_big_ap, std_big_ap)
 
         self._image_cleaned = image_cleaned
-        return image_cleaned
 
 
 class Atlas(object):
@@ -587,8 +604,8 @@ class Atlas(object):
         self._image_list = image_list
         self._dict = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
             'GALAX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5, 3)},
-            'SDSS': {'355.1nm': (0.3551, 4.5, 1.3), '468.6nm': (0.4686, 4.5, 1.3), '616.6nm': (0.6166, 4.5, 1.3),
-                     '748.0nm': (0.7480, 4.5, 1.3), '893.2nm': (0.8932, 4.5, 1.3)},
+            'SDSS': {'355.1nm': (0.3551, 0.45, 1.3), '468.6nm': (0.4686, 0.45, 1.3), '616.6nm': (0.6166, 0.45, 1.3),
+                     '748.0nm': (0.7480, 0.45, 1.3), '893.2nm': (0.8932, 0.45, 1.3)},
             '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
             'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
                      '22um': (22., 1.375, 12)}
@@ -706,7 +723,6 @@ class Atlas(object):
                     dict[radius[j]][wavelength[i]] = flux(ra[j])
         self._circular_measurement = dict
         return dict
-
 
     def __getitem__(self, items):
         '''
