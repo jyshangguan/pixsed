@@ -150,9 +150,6 @@ class Image(object):
             If True, will plot the background subtracted image.
         percent: float.
         xlim, ylim: tuple.
-        Return
-        ----------
-        2d array. The image after background subtraction.
         '''
         self._data_subbkg = self._data.copy()
         if method == 'simple':
@@ -168,8 +165,6 @@ class Image(object):
             if xlim and ylim:
                 plt.xlim(xlim[0], xlim[1])
                 plt.ylim(ylim[0], ylim[1])
-
-        return self._data_subbkg
 
     def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10,
                             deblend=False, nlevels=32, contrast=0.001,
@@ -539,13 +534,13 @@ class Image(object):
         ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
         return ax
 
-    def remove_sources_simple(self, length, catalog=None, plot=False, percent=98.,
+    def remove_sources_simple(self, l_half=18, catalog=None, plot=False, percent=98.,
                               xlim=False, ylim=False):
         '''
         Remove the contaminating sources in the image. Should run mask_stars() first.
         Parameter
         -----------
-        length: int.The length of the local box used for estimating the local background.
+        l: int.The length of the local box used for estimating the local background.
         catalog: table. The world coorde of the stars that overlap with the target galaxy.
         plot: bool.
             If True, will plot the sources removed image.
@@ -561,6 +556,7 @@ class Image(object):
         assert hasattr(self, '_sources_foreground'), 'Please run get_sources_foreground() first!'
         image_cleaned = self._data_subbkg.copy()
         fwhm = self._psf_FWHM
+        length = int(l_half * self._psf_FWHM)
         # clean stars on the background.
         x_len = self._shape[0]
         y_len = self._shape[1]
