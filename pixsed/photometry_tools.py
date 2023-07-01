@@ -72,25 +72,29 @@ class Image(object):
         else:
             self._ra, self._dec, self._coord = None, None, None
 
-    def background_model(self, box_size=50, filter_size=3):
+    def background_model(self, box_size=50, filter_size=3, plot=False):
         '''
         Generate the background model.Using median background method.
         Parameter
         ----------
-        box_size: int. The size used to calculate the local median.
-        filter_size: int. The kernel size used to smooth the background model.
-        Return
-        ----------
-        2d array. The background model.
+        box_size: int.
+            The size used to calculate the local median.
+        filter_size: int.
+            The kernel size used to smooth the background model.
+        plot: bool.
+            If True, it will plot the background model.
         '''
         img = self._data.copy()
-        mask_background = self.mask_background()
+        mask_background = self._mask_background
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
         bkg = Background2D(img, (box_size, box_size), mask=mask_background, filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
         self._background_model = bkg.background
-        return bkg.background
+
+        if plot:
+            plt.imshow(bkg.background, cmap='gray', origin='lower')
+            plt.colorbar()
 
     def background_properties(self, mask_type='quick', sigma=3, maxiters=5, **kwargs):
         '''
@@ -134,13 +138,18 @@ class Image(object):
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-    def background_subtract(self, method='full'):
+    def background_subtract(self, method='full', plot=False, percent=99., xlim=False, ylim=False):
         '''
         Remove the background of the image data.
         Parameter
         ----------
-        method: str.If the method is 'simple', the function just uses the median of the image to do the subtraction.
-                    If the method is 'full', the function  uses the background model to do the subtraction.
+        method: str.
+                If the method is 'simple', the function just uses the median of the image to do the subtraction.
+                If the method is 'full', the function  uses the background model to do the subtraction.
+        plot: bool.
+            If True, will plot the background subtracted image.
+        percent: float.
+        xlim, ylim: tuple.
         Return
         ----------
         2d array. The image after background subtraction.
@@ -152,6 +161,14 @@ class Image(object):
         elif method == 'full':
             assert hasattr(self, '_background_model'), 'Please run background_model() first!'
             self._data_subbkg -= self._background_model
+
+        if plot:
+            norm = simple_norm(self._data_subbkg, stretch='asinh', percent=percent)
+            plt.imshow(self._data_subbkg, cmap='gray', origin='lower', norm=norm)
+            if xlim and ylim:
+                plt.xlim(xlim[0], xlim[1])
+                plt.ylim(ylim[0], ylim[1])
+
         return self._data_subbkg
 
     def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10,
@@ -184,7 +201,7 @@ class Image(object):
         self._sources_segmentation = SourceCatalog(self._data, self._segmentation,
                                                    convolved_data=convolved_data)
 
-    def get_sources_galaxyarea(self, detect_thres=20., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
+    def get_sources_foreground(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
                                xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
                                xlim=False, ylim=False):
         '''
@@ -193,12 +210,22 @@ class Image(object):
         These sources will have an influence on the measurement,so they should be picked out separately.
         Parameter
         -----------
-        detect_thres: float. The threshold for DAOFinder.
-        xmatch_radius: float. The xmatch radius. arcsec.
-        xmatch_table: str. The Gaia ctalog table used for xmatch.
-        xmatch_gmag: float. The max G band magnitude of the stars which will be picked out.
-        xmatch_distance: float. The max distance of the stars which will be picked out. kpc.
-        xmatch_plxerror: float. The max rate of the error of parallax over the parallax.
+        detect_thres: float.
+            The threshold for DAOFinder.
+        xmatch_radius: float.
+            The xmatch radius. arcsec.
+        xmatch_table: str.
+            The Gaia ctalog table used for xmatch.
+        xmatch_gmag: float.
+            The max G band magnitude of the stars which will be picked out.
+        xmatch_distance: float.
+            The max distance of the stars which will be picked out. kpc.
+        xmatch_plxerror: float.
+            The max rate of the error of parallax over the parallax.
+        plot: bool.
+            If True, will plot the background subtracted image.
+        percent: float.
+        xlim, ylim: tuple.
         Return
         ---------
         A table contains Ra, Dec, and Gmag.
@@ -245,7 +272,7 @@ class Image(object):
                 plt.xlim(xlim[0], xlim[1])
                 plt.ylim(ylim[0], ylim[1])
 
-        self._sources_galaxyarea = front_stars_world
+        self._sources_foreground = front_stars_world
         return front_stars_world
 
     def get_isophote(self, plot=False):
@@ -318,21 +345,22 @@ class Image(object):
         if plot:
             self._rp.plot()
 
-    def mask_background(self):
+    def mask_background(self, plot=False):
         '''
         Get the mask of the target galaxy and all the sources on the background.
         Parameter
         ----------
-        Return
-        ----------
-        The background mask.
+        plot:bool.
+            if True,it will plot the background mask.
         '''
         mask_stars = self._mask_stars
         mask_galaxy = self._mask_galaxy
         self._mask_background = mask_stars + mask_galaxy
-        return (mask_stars + mask_galaxy)
 
-    def mask_galaxy(self, thres=0.3, iter=3, kernel_fwhm=10., kernel_size=11, expand=0.01):
+        if plot:
+            plt.imshow(mask_stars + mask_galaxy, cmap='gray', origin='lower')
+
+    def mask_galaxy(self, thres=1, iter=10, kernel_fwhm=5., kernel_size=5, plot=False):
         '''
         Get the mask of the target galaxy.
         Assuming that there is only one target object on the background.
@@ -350,9 +378,7 @@ class Image(object):
             The size of the convolution kernel.
         expand: float.
             The smaller, the more expansive. Should be less than 1.0 .
-        Return
-        ----------
-        The galaxy mask.
+        plot: bool.
         '''
         mea, med, std = self.background_properties()
         img_sub = self._data - med
@@ -375,13 +401,14 @@ class Image(object):
         kernel_galaxy = make_2dgaussian_kernel(kernel_fwhm, size=kernel_size)
         for i in range(iter):
             mask_galaxy = convolve(mask_galaxy, kernel_galaxy)
-        mask_galaxy = mask_galaxy > expand
+            mask_galaxy = mask_galaxy != 0
         self._mask_galaxy = mask_galaxy
-        return mask_galaxy
 
-    def mask_stars(self, thres=4., thres_area=1000, iter_point=5, iter_extend=5, kernel_fwhm_point=7.,
-                   kernel_size_point=7,
-                   kernel_fwhm_extend=20., kernel_size_extend=21, expand_point=0.001, expand_extend=0.001):
+        if plot:
+            plt.imshow(mask_galaxy, cmap='gray', origin='lower')
+
+    def mask_stars(self, thres=4., thres_area=800, iter_point=3, iter_extend=5, kernel_fwhm_point=7.,
+                   kernel_size_point=7, kernel_fwhm_extend=11., kernel_size_extend=11, plot=False):
         '''
         Get the mask of the background stars sources, including the expansive stars as well as the point stars.
         Parameter
@@ -402,11 +429,7 @@ class Image(object):
             The fwhm of the convolution kernel for extensive sources.
         kernel_size_point: int.
             The size of the convolution kernel for extensive sources.
-        expand: float.
-            The smaller, the more expansive. Should be less than 1.0 .
-        Return
-        ----------
-        The stars mask.
+        plot: bool.
         '''
         assert hasattr(self, '_mask_galaxy'), 'Please run mask_galaxy() first!'
         galaxy_mask = self._mask_galaxy
@@ -435,15 +458,17 @@ class Image(object):
 
         for i in range(iter_extend):
             mask_extend = convolve(mask_extend, kernel_extend)
-        mask_extend = mask_extend > expand_extend
+            mask_extend = mask_extend != 0
 
         for i in range(iter_point):
             mask_point = convolve(mask_point, kernel_point)
-        mask_point = mask_point > expand_point
+            mask_point = mask_point != 0
 
         mask_stars = mask_point + mask_extend
         self._mask_stars = mask_stars
-        return mask_stars
+
+        if plot:
+            plt.imshow(mask_stars, cmap='gray', origin='lower')
 
     def mask_segmentation(self, kernel_fwhm=None, kernel_size=5):
         '''
@@ -514,13 +539,18 @@ class Image(object):
         ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
         return ax
 
-    def remove_sources_simple(self, length, catalog=None):
+    def remove_sources_simple(self, length, catalog=None, plot=False, percent=98.,
+                              xlim=False, ylim=False):
         '''
         Remove the contaminating sources in the image. Should run mask_stars() first.
         Parameter
         -----------
         length: int.The length of the local box used for estimating the local background.
         catalog: table. The world coorde of the stars that overlap with the target galaxy.
+        plot: bool.
+            If True, will plot the sources removed image.
+        percent: float.
+        xlim, ylim: tuple.
         Return
         -----------
         2d array. The cleaned image.
@@ -528,7 +558,7 @@ class Image(object):
         assert hasattr(self, '_bkg_median'), 'Please run background_properties() first!'
         assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
         assert hasattr(self, '_mask_stars'), 'Please run mask_stars() first!'
-        assert hasattr(self, '_sources_galaxyarea'), 'Please run get_sources_galaxyarea() first!'
+        assert hasattr(self, '_sources_foreground'), 'Please run get_sources_foreground() first!'
         image_cleaned = self._data_subbkg.copy()
         fwhm = self._psf_FWHM
         # clean stars on the background.
@@ -541,7 +571,7 @@ class Image(object):
                     image_cleaned[xc, yc] = random.gauss(new_bkg_mea, new_bkg_std)
         # clean stars that overlap with the target galaxy.
         if catalog is None:
-            cat_world = self._sources_galaxyarea
+            cat_world = self._sources_foreground
         else:
             cat_world = catalog
         w = self._wcs
@@ -584,6 +614,13 @@ class Image(object):
                 for b in range(-clean_ra, clean_ra + 1):
                     if sqrt(a ** 2 + b ** 2) <= clean_ra:
                         image_cleaned[yc + b, xc + a] = random.gauss(mea_big_ap, std_big_ap)
+
+        if plot:
+            norm = simple_norm(image_cleaned, stretch='asinh', percent=percent)
+            plt.imshow(image_cleaned, cmap='gray', origin='lower', norm=norm)
+            if xlim and ylim:
+                plt.xlim(xlim[0], xlim[1])
+                plt.ylim(ylim[0], ylim[1])
 
         self._image_cleaned = image_cleaned
 
