@@ -1,28 +1,28 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from astropy.wcs import WCS
-from astropy.stats import sigma_clipped_stats, mad_std, SigmaClip
-from astropy.convolution import convolve
-from astropy.table import Table
+import random
+from math import log, sqrt, ceil, log10
+
 import astropy.units as u
+import extinction
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+from astropy.convolution import convolve
 from astropy.coordinates import SkyCoord
+from astropy.stats import sigma_clipped_stats, SigmaClip
+from astropy.table import Table
 from astropy.visualization import simple_norm
-from photutils.isophote import Ellipse, build_ellipse_model
-from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog
+from astropy.wcs import WCS
+from astropy.modeling import models, fitting
+from astroquery.xmatch import XMatch
+from photutils.aperture import CircularAperture
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile, CurveOfGrowth
-from photutils.aperture import CircularAperture
-from astroquery.gaia import Gaia
-from astroquery.xmatch import XMatch
+from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog
 from reproject import reproject_adaptive
-from math import log, sqrt, ceil
-import random
-import extinction
 from scipy import interpolate
-from utils import read_coordinate, plot_image
 
-import matplotlib as mpl
+from utils import read_coordinate, plot_image, circular_error_estimate
 
 mpl.rc("xtick", direction="in", labelsize=16)
 mpl.rc("ytick", direction="in", labelsize=16)
@@ -461,6 +461,8 @@ class Image(object):
 
         mask_stars = mask_point + mask_extend
         self._mask_stars = mask_stars
+        self._mask_point = mask_point
+        self._mask_extend = mask_extend
 
         if plot:
             plt.imshow(mask_stars, cmap='gray', origin='lower')
@@ -620,6 +622,35 @@ class Image(object):
 
         self._image_cleaned = image_cleaned
 
+    def get_error(self, r=(5, 10, 20, 30, 40, 50, 60), nexample=100):
+        '''
+        Get the relationship between log10(std) and log10(area).
+        Parameter
+        -----------
+        r: tuple. optional.
+            Contain the radius of circular samples.
+        nexample: int.
+            The number of sampling.
+
+        self._error_log_line
+        -------------
+        The function of log10(std) and log10(area). ('asec')
+        '''
+        img_error = self._data_subbkg.copy()
+        mask = self._mask_point + self._mask_extend
+        pxs = (abs(self._header['CDELT1']) * 3600.)
+        error_list = []
+        for rr in r:
+            error_list.append(circular_error_estimate(img_error, mask, rr, nexample))
+        line_init = models.Linear1D()
+        r_list = [(rr * pxs) for rr in r]  # world r.
+        area_list = [(np.pi * rr ** 2) for rr in r_list]
+        fit = fitting.LinearLSQFitter()
+        x_fit = [log10(i) for i in area_list]
+        y_fit = [log10(j) for j in error_list]
+        fitted_line = fit(line_init, x_fit, y_fit)
+        self._error_log_line = fitted_line
+
 
 class Atlas(object):
     '''
@@ -705,7 +736,7 @@ class Atlas(object):
 
         self._image_list_mathced = rpj_img_list
         self._header = match_header
-        self._wavelength = wavelength
+        self._wavelength = wavelength  # um
         return rpj_img_list
 
     def get_target_coord_pix(self):
@@ -718,44 +749,76 @@ class Atlas(object):
         self._target_coord = self._image_list[0]._coord
         return xc, yc
 
-    def circular_measurement(self, radius, a_v, gala_extinction=True):
+    def get_a_v(self):
+        '''
+        https://irsa.ipac.caltech.edu/applications/DUST/
+        '''
+        sky_coord = self._image_list[0]._coord
+        self._a_v = None
+
+    def circular_measurement(self, radius=None, a_v=None, gala_extinction=True):
         '''
         Do the circular measurement.
-        radius: list
-            A list containing different aperture radius for the measurement. 'asec'
+        radius: float
+            The max radius for measurement, which must containing all the flux. 'asec'
         a_v: float.
             The a_v for galactic extinction.
         gala_extinction: bool
             If True, it will do the galactic extinction correction.
-        Return
+
+        self._circular_measurement
         ----------
-        A dictionary.
-        Containing the multi-band flux under different aperture size.
+        A dictionary. Containing functions (input is radius in 'asec').
+        Containing the multi-band flux, and error. ('Jy')
         '''
         wavelength = self._wavelength
-        ra = [i / (abs(self._header['CDELT1']) * 3600.) for i in radius]
         xc, yc = self.get_target_coord_pix()
+        pxs = (abs(self._header['CDELT1']) * 3600.)
+        if radius:
+            ra = radius / pxs
+        else:
+            img_matched_list = self._image_list_mathced
+            ra_box = []
+            for i in range(len(img_matched_list)):
+                mea, med, std = sigma_clipped_stats(img_matched_list[i], maxiters=5)
+                min_radius = 0.0
+                max_radius = (min(np.shape(img_matched_list[i])[0], np.shape(img_matched_list[i])[1]) // 2) - 5
+                radius_step = 1.0
+                rp = RadialProfile(img_matched_list[i], (xc, yc), min_radius, max_radius, radius_step)
+                h = rp.profile
+                ra_t = max_radius
+                for j in range(len(h)):
+                    if h <= mea + 3 * std:
+                        ra_t = j
+                        break
+                ra_box.append(ra_t)
+            ra = max(ra_box)
+
+        if not a_v:
+            a_v = self._a_v
         dict = {}
-        for i in radius:
-            dict[i] = {}
+        if gala_extinction:
+            a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
+            a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
         for i in range(len(wavelength)):
-            ra_max = max(ra)
             min_radius = 0.0
-            max_radius = ra_max + 1
+            max_radius = ra
             radius_step = 1.0
             cog = CurveOfGrowth(self._image_list_mathced, (xc, yc), min_radius, max_radius, radius_step)
             h = cog.profile
             r = cog.radius
-            flux = interpolate.interp1d(r, h)
-            for j in range(len(ra)):
-                if gala_extinction:
-                    a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
-                    a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
-                    dict[radius[j]][wavelength[i]] = flux(ra[j]) * a_list_flux[i]
-                else:
-                    dict[radius[j]][wavelength[i]] = flux(ra[j])
+            r_c = [rr * pxs for rr in r]
+            if gala_extinction:
+                h_c = [hh * a_list_flux[i] for hh in h]
+                flux = interpolate.interp1d(r_c, h_c)
+            else:
+                flux = interpolate.interp1d(r_c, h)
+            dict[wavelength[i]] = {}
+            dict[wavelength[i]]['flux'] = flux
+            error_line = self._image_list[i]._error_log_line
+            error = lambda xr: 10 ** error_line(log10(np.pi * (xr ** 2)))
+            dict[wavelength[i]]['error'] = error
         self._circular_measurement = dict
-        return dict
 
     def __getitem__(self, items):
         '''
