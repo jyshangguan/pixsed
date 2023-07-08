@@ -622,7 +622,7 @@ class Image(object):
 
         self._image_cleaned = image_cleaned
 
-    def get_error(self, r=(5, 10, 20, 30, 40, 50, 60), nexample=100):
+    def get_error(self, r=(10, 20, 30), nexample=50):
         '''
         Get the relationship between log10(std) and log10(area).
         Parameter
@@ -637,7 +637,7 @@ class Image(object):
         The function of log10(std) and log10(area). ('asec')
         '''
         img_error = self._data_subbkg.copy()
-        mask = self._mask_point + self._mask_extend
+        mask = self._mask_background
         pxs = (abs(self._header['CDELT1']) * 3600.)
         error_list = []
         for rr in r:
@@ -705,7 +705,7 @@ class Atlas(object):
         sigma_kernel = [sqrt(max(sigma_list) ** 2 - sigma_list[i] ** 2) for i in range(len(sigma_list))]
         sigma_kernel_pixel = [sigma_kernel[i] / pixel_size[i] for i in range(len(sigma_kernel))]
         conv_img_list = []
-        fwhm_pixel = [fwhm_list[i] / pixel_size[i] for i in range(len(fwhm_list))]
+        #  fwhm_pixel = [fwhm_list[i] / pixel_size[i] for i in range(len(fwhm_list))]
         size = []
         for i in range(len(sigma_kernel_pixel)):
             if ceil(sigma_kernel_pixel[i]) % 2 == 0:
@@ -713,7 +713,7 @@ class Atlas(object):
             else:
                 size.append(ceil(sigma_kernel_pixel[i]))
         for i in range(len(new_img_list)):
-            if sigma_kernel[i] == 0:
+            if sigma_kernel[i] == 0.:
                 conv_img_list.append(new_img_list[i])
                 continue
             kernel = make_2dgaussian_kernel((2 * sqrt(2 * log(2))) * sigma_kernel_pixel[i], size=3 * size[i])
@@ -722,7 +722,7 @@ class Atlas(object):
         # reproject
         if not match_header:
             for header in header_list:
-                if header['TELESCOP'] == "2MASS" and header['WVLNGTH'].split()[0] == '2.16um':
+                if header['TELESCOP'].split()[0] == "2MASS" and header['WVLNGTH'].split()[0] == '2.16um':
                     match_header = header
                     break
         else:
@@ -730,7 +730,7 @@ class Atlas(object):
         rpj_img_list = []
         for i in range(len(conv_img_list)):
             array, _ = reproject_adaptive((conv_img_list[i], WCS(header_list[i])),
-                                          WCS(match_header), shape_out=np.shape(img_list[9]),
+                                          WCS(match_header), shape_out=(match_header['NAXIS1'], match_header['NAXIS2']),
                                           kernel='gaussian', conserve_flux=True, boundary_mode='ignore')
             rpj_img_list.append(array)
 
@@ -756,7 +756,7 @@ class Atlas(object):
         sky_coord = self._image_list[0]._coord
         self._a_v = None
 
-    def circular_measurement(self, radius=None, a_v=None, gala_extinction=True):
+    def circular_measurement(self, radius=None, a_v=None, gala_extinction=True, error=True):
         '''
         Do the circular measurement.
         radius: float
@@ -788,7 +788,7 @@ class Atlas(object):
                 h = rp.profile
                 ra_t = max_radius
                 for j in range(len(h)):
-                    if h <= mea + 3 * std:
+                    if h[j] <= mea + 3 * std:
                         ra_t = j
                         break
                 ra_box.append(ra_t)
@@ -804,7 +804,7 @@ class Atlas(object):
             min_radius = 0.0
             max_radius = ra
             radius_step = 1.0
-            cog = CurveOfGrowth(self._image_list_mathced, (xc, yc), min_radius, max_radius, radius_step)
+            cog = CurveOfGrowth(self._image_list_mathced[i], (xc, yc), min_radius, max_radius, radius_step)
             h = cog.profile
             r = cog.radius
             r_c = [rr * pxs for rr in r]
@@ -815,9 +815,10 @@ class Atlas(object):
                 flux = interpolate.interp1d(r_c, h)
             dict[wavelength[i]] = {}
             dict[wavelength[i]]['flux'] = flux
-            error_line = self._image_list[i]._error_log_line
-            error = lambda xr: 10 ** error_line(log10(np.pi * (xr ** 2)))
-            dict[wavelength[i]]['error'] = error
+            if error:
+                error_line = self._image_list[i]._error_log_line
+                error = lambda xr: 10 ** error_line(log10(np.pi * (xr ** 2)))
+                dict[wavelength[i]]['error'] = error
         self._circular_measurement = dict
 
     def __getitem__(self, items):
