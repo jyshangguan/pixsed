@@ -80,7 +80,7 @@ def read_coordinate(ra, dec):
     return c
 
 
-def circular_error_estimate(img, mask, radius, nexample):
+def circular_error_estimate(img, mask, radius, nexample, percent=85.):
     std_list = []
     count = 0
     xllim = radius + 1
@@ -90,18 +90,20 @@ def circular_error_estimate(img, mask, radius, nexample):
     while count <= nexample:
         x_cen = np.random.randint(xllim, xhlim)
         y_cen = np.random.randint(yllim, yhlim)
-        if mask[y_cen, x_cen] or not isinstance(img[y_cen, x_cen], float):
+        if mask[y_cen, x_cen] or img[y_cen, x_cen] == 'nan':
             continue
-        flag = 0
+        count_mask = 0
+        count_num = 0
         data_sum = 0
         for ar in range(-radius, radius + 1):
             for br in range(-radius, radius + 1):
-                if mask[y_cen + ar, x_cen + br] or not isinstance(img[y_cen + ar, x_cen + br], float):
-                    flag = 1
+                if mask[y_cen + ar, x_cen + br] or img[y_cen + ar, x_cen + br] == 'nan':
+                    count_mask += 1
                 else:
                     data_sum += img[y_cen + ar, x_cen + br]
-        if flag == 0:
+                    count_num += 1
+        if count_num / (count_mask + count_num) > percent * 0.01:
             count += 1
-            std_list.append(data_sum)
+            std_list.append(data_sum * (count_mask + count_num) / count_num)
     mean, mead, std = sigma_clipped_stats(np.array(std_list))
     return std
