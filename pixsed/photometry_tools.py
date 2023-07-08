@@ -817,9 +817,38 @@ class Atlas(object):
             dict[wavelength[i]]['flux'] = flux
             if error:
                 error_line = self._image_list[i]._error_log_line
-                error = lambda xr: 10 ** error_line(log10(np.pi * (xr ** 2)))
+                error = lambda xr: a_list_flux[i] * (10 ** error_line(log10(np.pi * (xr ** 2))))
                 dict[wavelength[i]]['error'] = error
         self._circular_measurement = dict
+        self._rmax = ra * pxs
+
+    def make_catalog(self, measurement_ra, redshift=0, id=0, plot=False):
+        ref = {
+            0.1528: 'FUV', 0.2271: 'NUV', 0.3551: 'u_sdss', 0.4686: 'g_sdss', 0.6166: 'r_sdss', 0.7480: 'i_sdss',
+            0.8932: 'z_sdss', 1.25: 'J_2mass', 1.65: 'H_2mass', 2.16: 'Ks_2mass', 3.4: 'WISE1', 4.6: 'WISE2',
+            12: 'WISE3', 22: 'WISE4'
+        }
+        data = self._circular_measurement
+        k = data.keys()
+        k_list = sorted(k)
+        for r in measurement_ra:
+            f = open('{}_{}.txt'.format(id, r), 'x')
+            f.write('#id redshift ')
+            for key in k_list:
+                f.write('{} {}_err '.format(ref[key], ref[key]))
+            f.write('alpha delta mask')
+            f.write('{} {} '.format(id, redshift))
+            for key in k_list:
+                f.write('{} {} '.format(data[key]['flux'](r) / 1000, data[key]['error'](r) / 1000))
+            f.write('26.68679 -0.67865 0 ')
+            f.close()
+        if plot:
+            for r in measurement_ra:
+                x = plt.plot([log10(i) for i in k_list], [log10(data[i]['flux'](r) / 1000) for i in k_list],
+                             marker='x', markersize=3, label='{} arcsec radius'.format(r), linewidth=1)
+                plt.xlabel('lg(wavelength) / μm')
+                plt.ylabel('lg(flux) / mJy')
+                plt.legend()
 
     def __getitem__(self, items):
         '''
