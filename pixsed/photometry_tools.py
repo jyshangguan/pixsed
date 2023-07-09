@@ -1,5 +1,6 @@
 import random
 from math import log, sqrt, ceil, log10
+import os
 
 import astropy.units as u
 import extinction
@@ -44,7 +45,7 @@ class Image(object):
         ----------
         data : numpy 2D array
             The 2D image data.
-        hearder : astropy fits header
+        header : astropy fits header
             The header of the image data.
         target_coordinate : Tuple. Contain two floats.
             The Ra and Dec of the target galaxy.
@@ -235,18 +236,20 @@ class Image(object):
         # Gaia Xmatch
         w = self._wcs
         sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
-        for i in range(len(sources)):
-            sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
-            sources_world.add_row([sky.ra, sky.dec])
-        t_o = XMatch.query(cat1=sources_world,
-                           cat2=xmatch_table,
-                           max_distance=xmatch_radius * u.arcsec, colRA1='Ra', colDec1='Dec')  # Gaia xmatch.
-        front_stars_set = set()
-        for i in range(len(t_o)):  # Use some standards to judge, cleaning out the fake detections.
-            if t_o['Plx'][i] != '--' and t_o['Plx'][i] > 0. and t_o['Gmag'][i] < xmatch_gmag:
-                if 1 / t_o['Plx'][i] < xmatch_distance and t_o['e_Plx'][i] < xmatch_plxerror * t_o['Plx'][i]:
-                    front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
-
+        if sources:
+            for i in range(len(sources)):
+                sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
+                sources_world.add_row([sky.ra, sky.dec])
+            t_o = XMatch.query(cat1=sources_world,
+                               cat2=xmatch_table,
+                               max_distance=xmatch_radius * u.arcsec, colRA1='Ra', colDec1='Dec')  # Gaia xmatch.
+            front_stars_set = set()
+            for i in range(len(t_o)):  # Use some standards to judge, cleaning out the fake detections.
+                if t_o['Plx'][i] != '--' and t_o['Plx'][i] > 0. and t_o['Gmag'][i] < xmatch_gmag:
+                    if 1 / t_o['Plx'][i] < xmatch_distance and t_o['e_Plx'][i] < xmatch_plxerror * t_o['Plx'][i]:
+                        front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
+        else:
+            front_stars_set = set()
         front_stars_list = list(front_stars_set)
         front_stars_world = Table(names=['Ra', 'Dec', 'Gmag'])  # Build up the final foreground stars table.
         for j in range(len(front_stars_set)):
@@ -831,12 +834,13 @@ class Atlas(object):
         data = self._circular_measurement
         k = data.keys()
         k_list = sorted(k)
+        os.makedirs('catalog')
         for r in measurement_ra:
-            f = open('{}_{}.txt'.format(id, r), 'x')
+            f = open('catalog/{}_{}.txt'.format(id, r), 'x')
             f.write('#id redshift ')
             for key in k_list:
                 f.write('{} {}_err '.format(ref[key], ref[key]))
-            f.write('alpha delta mask')
+            f.write('alpha delta mask ')
             f.write('{} {} '.format(id, redshift))
             for key in k_list:
                 f.write('{} {} '.format(data[key]['flux'](r) / 1000, data[key]['error'](r) / 1000))
