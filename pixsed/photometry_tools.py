@@ -238,6 +238,10 @@ class Image(object):
         sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
         if sources:
             for i in range(len(sources)):
+                center_distance = sqrt((sources['xcentroid'][i] - self._coord_pix[0]) ** 2 +
+                                       (sources['ycentroid'][i] - self._coord_pix[1]) ** 2) * self._pxs
+                if center_distance < 2 * xmatch_radius:
+                    break
                 sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
                 sources_world.add_row([sky.ra, sky.dec])
             t_o = XMatch.query(cat1=sources_world,
@@ -311,6 +315,7 @@ class Image(object):
             self._psf_FWHM = dictionary[telescope][str_wavelength][2] / dictionary[telescope][str_wavelength][
                 1]  # pixels
             self._psf = None
+            self._pxs = dictionary[telescope][str_wavelength][1]
 
     def get_radial_profile(self, data, ra_max, step=1., mask=None, kind='linear', plot=False):
         '''
@@ -740,6 +745,7 @@ class Atlas(object):
         self._image_list_mathced = rpj_img_list
         self._header = match_header
         self._wavelength = wavelength  # um
+        self._fwhm = max(fwhm_list)
         return rpj_img_list
 
     def get_target_coord_pix(self):
@@ -825,7 +831,7 @@ class Atlas(object):
         self._circular_measurement = dict
         self._rmax = ra * pxs
 
-    def make_catalog(self, measurement_ra, redshift=0, id=0, plot=False):
+    def make_catalog(self, measurement_ra=None, redshift=0, id=0, plot=False):
         ref = {
             0.1528: 'FUV', 0.2271: 'NUV', 0.3551: 'u_sdss', 0.4686: 'g_sdss', 0.6166: 'r_sdss', 0.7480: 'i_sdss',
             0.8932: 'z_sdss', 1.25: 'J_2mass', 1.65: 'H_2mass', 2.16: 'Ks_2mass', 3.4: 'WISE1', 4.6: 'WISE2',
@@ -835,6 +841,21 @@ class Atlas(object):
         k = data.keys()
         k_list = sorted(k)
         os.makedirs('catalog')
+        if not measurement_ra:
+            rmax = float(self._rmax)
+            rmin = float(self._fwhm / 2)
+            measurement_ra_t = []
+            measurement_ra = []
+            count = 0
+            while True:
+                r_temp = rmin * (2 ** count)
+                if r_temp >= rmax:
+                    measurement_ra_t.append(rmax)
+                    break
+                measurement_ra_t.append(r_temp)
+                count += 1
+            for i in measurement_ra_t:
+                measurement_ra.append(round(i, 1))
         for r in measurement_ra:
             f = open('catalog/{}_{}.txt'.format(id, r), 'x')
             f.write('#id redshift ')
