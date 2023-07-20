@@ -107,3 +107,6 @@ def circular_error_estimate(img, mask, radius, nexample, percent=85.):
             std_list.append(data_sum * (count_mask + count_num) / count_num)
     mean, mead, std = sigma_clipped_stats(np.array(std_list))
     return std
+
+
+

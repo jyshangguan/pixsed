@@ -19,7 +19,7 @@ from photutils.aperture import CircularAperture
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile, CurveOfGrowth
-from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog
+from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog, SourceFinder
 from reproject import reproject_adaptive
 from scipy import interpolate
 
@@ -194,10 +194,10 @@ class Image(object):
         else:
             self._segmentation = segment_map
 
-        self._sources_segmentation = SourceCatalog(self._data, self._segmentation,
+        self._segmentation_catalog = SourceCatalog(self._data, self._segmentation,
                                                    convolved_data=convolved_data)
 
-    def get_sources_foreground(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
+    def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
                                xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
                                xlim=False, ylim=False):
         '''
@@ -238,10 +238,10 @@ class Image(object):
         sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
         if sources:
             for i in range(len(sources)):
-                center_distance = sqrt((sources['xcentroid'][i] - self._coord_pix[0]) ** 2 +
-                                       (sources['ycentroid'][i] - self._coord_pix[1]) ** 2) * self._pxs
-                if center_distance < 2 * xmatch_radius:
-                    break
+                #center_distance = sqrt((sources['xcentroid'][i] - self._coord_pix[0]) ** 2 +
+                #                       (sources['ycentroid'][i] - self._coord_pix[1]) ** 2) * self._pxs
+                #if center_distance < 2 * xmatch_radius:
+                #    break
                 sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
                 sources_world.add_row([sky.ra, sky.dec])
             t_o = XMatch.query(cat1=sources_world,
@@ -252,12 +252,19 @@ class Image(object):
                 if t_o['Plx'][i] != '--' and t_o['Plx'][i] > 0. and t_o['Gmag'][i] < xmatch_gmag:
                     if 1 / t_o['Plx'][i] < xmatch_distance and t_o['e_Plx'][i] < xmatch_plxerror * t_o['Plx'][i]:
                         front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
+
+            for i in range(len(t_o)):
+                if t_o['PSS'][i] != '--' or t_o['PQSO'][i] != '--' or t_o['PGal'][i] != '--':
+                    if t_o['PSS'][i] > 0.1 or t_o['PQSO'][i] > 0.1 or t_o['PGal'][i] > 0.1:
+                        if t_o['Plx'][i] > 3.5 * t_o['e_Plx'][i]:
+                            front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
+
         else:
             front_stars_set = set()
         front_stars_list = list(front_stars_set)
-        front_stars_world = Table(names=['Ra', 'Dec', 'Gmag'])  # Build up the final foreground stars table.
+        front_stars_world = Table(names=['Ra', 'Dec', 'Gmag', 'mean', 'std'])  # Build up the final foreground stars table.
         for j in range(len(front_stars_set)):
-            front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2]])
+            front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2], 0, 0])
 
         if plot:
             plot_tb = Table(names=['x', 'y'])
@@ -274,7 +281,7 @@ class Image(object):
                 plt.xlim(xlim[0], xlim[1])
                 plt.ylim(ylim[0], ylim[1])
 
-        self._sources_foreground = front_stars_world
+        self._sources_overlap = front_stars_world
         return front_stars_world
 
     def get_isophote(self, plot=False):
@@ -392,7 +399,7 @@ class Image(object):
         sources_tb = cat.to_table()
         if self._coord:
             x, y = [int(i) for i in self._coord_pix]
-            label = segment_map.data[x, y]
+            label = segment_map.data[y,x]
         else:
             max_area = 0.
             label = 0
@@ -563,7 +570,7 @@ class Image(object):
         assert hasattr(self, '_bkg_median'), 'Please run background_properties() first!'
         assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
         assert hasattr(self, '_mask_stars'), 'Please run mask_stars() first!'
-        assert hasattr(self, '_sources_foreground'), 'Please run get_sources_foreground() first!'
+        assert hasattr(self, '_sources_overlap'), 'Please run get_sources_overlap() first!'
         image_cleaned = self._data_subbkg.copy()
         fwhm = self._psf_FWHM
         length = int(l_half * self._psf_FWHM)
@@ -577,7 +584,7 @@ class Image(object):
                     image_cleaned[xc, yc] = random.gauss(new_bkg_mea, new_bkg_std)
         # clean stars that overlap with the target galaxy.
         if catalog is None:
-            cat_world = self._sources_foreground
+            cat_world = self._sources_overlap
         else:
             cat_world = catalog
         w = self._wcs
@@ -604,7 +611,7 @@ class Image(object):
             flag = True
             clean_ra = 0
             for d in range(int(fwhm), len(h)):
-                if (h[d] < mea_sample + 3 * std_sample) and flag:
+                if (h[d] < mea_sample + 2 * std_sample) and flag:
                     clean_ra = int(r[d])
                     flag = False
             if clean_ra == 0 or clean_ra > 8 * fwhm:
@@ -616,6 +623,8 @@ class Image(object):
                     if big_ra > sqrt(a ** 2 + b ** 2) > clean_ra:
                         big_ap.append(image_cleaned[yc + b, xc + a])
             mea_big_ap, med_big_ap, std_big_ap = sigma_clipped_stats(np.array(big_ap))
+            cat_world[i]['mean'] = mea_big_ap
+            cat_world[i]['std'] = std_big_ap
             for a in range(-clean_ra, clean_ra + 1):
                 for b in range(-clean_ra, clean_ra + 1):
                     if sqrt(a ** 2 + b ** 2) <= clean_ra:
@@ -628,7 +637,63 @@ class Image(object):
                 plt.xlim(xlim[0], xlim[1])
                 plt.ylim(ylim[0], ylim[1])
 
-        self._image_cleaned = image_cleaned
+        self._image_cleaned_simple = image_cleaned
+        self._sources_overlap = cat_world
+
+    def get_galaxy_model(self, boxsize=10, filter_size=3):
+        sample = self._image_cleaned_simple.copy()
+        sigma_clip = SigmaClip(sigma=3.)
+        bkg_estimator = MedianBackground()
+        bkg = Background2D(sample, (boxsize, boxsize), filter_size=(filter_size, filter_size),
+                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+        self._galaxy_model = bkg.background
+
+
+    def get_sources_segmentation(self, thres=5.):
+        sources = self._data_subbkg - self._galaxy_model
+        sources -= sigma_clipped_stats(sources)[0]
+        mea, med, std = sigma_clipped_stats(sources)
+        kernel = make_2dgaussian_kernel(self._psf_FWHM, size=5)
+        convolved_data = convolve(sources, kernel)
+        finder = SourceFinder(npixels=10, progress_bar=False)
+        segment_map = finder(convolved_data, thres * std)
+
+        self._sources_segmentation = segment_map
+
+    def remove_sources(self, interaction=False, plot=False, percent=98.,
+                              xlim=False, ylim=False):
+        sample = self._image_cleaned_simple.copy()
+        segment_map = self._sources_segmentation
+        stars_label = []
+        cat_world = self._sources_overlap
+        w = WCS(self._header)
+        for i in range(len(cat_world)):
+            sky = SkyCoord(cat_world['Ra'][i], cat_world['Dec'][i], frame='icrs', unit='deg')
+            x, y = w.world_to_pixel(sky)
+            xc, yc = int(x), int(y)
+            stars_label.append((segment_map.data[yc, xc], cat_world[i]['mean'], cat_world[i]['std']))
+        for a in range(np.shape(sample)[0]):
+            for b in range(np.shape(sample)[0]):
+                label = segment_map.data[b, a]
+                for i in range(len(stars_label)):
+                    if stars_label[i][0] == label:
+                        sample[b, a] = random.gauss(stars_label[i][1], stars_label[i][2])
+                        break
+
+        if plot:
+            norm = simple_norm(sample, stretch='asinh', percent=percent)
+            plt.imshow(sample, cmap='gray', origin='lower', norm=norm)
+            if xlim and ylim:
+                plt.xlim(xlim[0], xlim[1])
+                plt.ylim(ylim[0], ylim[1])
+
+        self._image_cleaned = sample
+
+
+
+
+
+
 
     def get_error(self, r=(10, 20, 30), nexample=50):
         '''
