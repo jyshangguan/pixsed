@@ -14,6 +14,7 @@ from astropy.table import Table
 from astropy.visualization import simple_norm
 from astropy.wcs import WCS
 from astropy.modeling import models, fitting
+from astropy.io import fits
 from astroquery.xmatch import XMatch
 from photutils.aperture import CircularAperture
 from photutils.background import Background2D, MedianBackground
@@ -39,7 +40,8 @@ class Image(object):
     science target in the image.
     '''
 
-    def __init__(self, data, header, target_coordinate=None, psf_fwhm=None):
+    def __init__(self, data, header, target_coordinate=None, psf_fwhm=None,
+                 str_wavelength=None, str_telescope=None):
         '''
         Parameters
         ----------
@@ -57,6 +59,10 @@ class Image(object):
         self._header = header
         self._shape = data.shape
         self._wcs = WCS(header)
+        if str_wavelength is None:
+            self._str_wavelength = self._header['WVLNGTH'].split()[0]
+        if str_telescope is None:
+            self._str_telescope = self._header['TELESCOP'].split()[0]
 
         if psf_fwhm is None:
             self.get_psf()
@@ -198,8 +204,8 @@ class Image(object):
                                                    convolved_data=convolved_data)
 
     def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                               xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
-                               xlim=False, ylim=False):
+                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
+                            xlim=False, ylim=False):
         '''
         Get the foreground stars that overlap with the target galaxy. Use Gaia xmatch to make sure that the all the
         stars in the list are foreground stars (not a structure of the target galaxy or something).
@@ -238,10 +244,6 @@ class Image(object):
         sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
         if sources:
             for i in range(len(sources)):
-                #center_distance = sqrt((sources['xcentroid'][i] - self._coord_pix[0]) ** 2 +
-                #                       (sources['ycentroid'][i] - self._coord_pix[1]) ** 2) * self._pxs
-                #if center_distance < 2 * xmatch_radius:
-                #    break
                 sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
                 sources_world.add_row([sky.ra, sky.dec])
             t_o = XMatch.query(cat1=sources_world,
@@ -255,16 +257,22 @@ class Image(object):
 
             for i in range(len(t_o)):
                 if t_o['PSS'][i] != '--' or t_o['PQSO'][i] != '--' or t_o['PGal'][i] != '--':
-                    if t_o['PSS'][i] > 0.1 or t_o['PQSO'][i] > 0.1 or t_o['PGal'][i] > 0.1:
+                    if t_o['PSS'][i] > 0.9 or t_o['PQSO'][i] > 0.9 or t_o['PGal'][i] > 0.9:
                         if t_o['Plx'][i] > 3.5 * t_o['e_Plx'][i]:
                             front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
 
         else:
             front_stars_set = set()
         front_stars_list = list(front_stars_set)
-        front_stars_world = Table(names=['Ra', 'Dec', 'Gmag', 'mean', 'std'])  # Build up the final foreground stars table.
+        front_stars_world = Table(
+            names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])  # Build up the final foreground stars table.
         for j in range(len(front_stars_set)):
-            front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2], 0, 0])
+            #x_t, y_t = w.world_to_pixel(SkyCoord(front_stars_list[j][0],front_stars_list[j][1], unit='deg'))
+            #center_distance = sqrt((x_t - self._coord_pix[0]) ** 2 +
+            #                       (y_t - self._coord_pix[1]) ** 2) * self._pxs
+            #if center_distance <= xmatch_radius:
+            #    continue
+            front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2], 0, 0, 0])
 
         if plot:
             plot_tb = Table(names=['x', 'y'])
@@ -311,14 +319,18 @@ class Image(object):
         if method == 'direct':
             str_wavelength = self._header['WVLNGTH'].split()[0]
             telescope = self._header['TELESCOP'].split()[0]
-            dictionary = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
-                'GALEX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5.3)},
-                'SDSS': {'355.1nm': (0.3551, 0.45, 1.3), '468.6nm': (0.4686, 0.45, 1.3), '616.6nm': (0.6166, 0.45, 1.3),
-                         '748.0nm': (0.7480, 0.45, 1.3), '893.2nm': (0.8932, 0.45, 1.3)},
-                '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
-                'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
-                         '22um': (22., 1.375, 12)}
+
+            dictionary = {  # wavelength(um), pixel size(asec), psf fwhm(asec), filter name
+                'GALEX': {'152.8nm': (0.1528, 3.2, 4.3, 'FUV'), '227.1nm': (0.2271, 3.2, 5.3, 'NUV')},
+                'SDSS': {'355.1nm': (0.3551, 0.45, 1.3, 'u'), '468.6nm': (0.4686, 0.45, 1.3, 'g'),
+                         '616.6nm': (0.6166, 0.45, 1.3, 'r'),
+                         '748.0nm': (0.7480, 0.45, 1.3, 'i'), '893.2nm': (0.8932, 0.45, 1.3, 'z')},
+                '2MASS': {'1.25um': (1.25, 1., 2., 'J'), '1.65um': (1.65, 1., 2., 'H'), '2.16um': (2.16, 1., 2., 'Ks')},
+                'WISE': {'3.4um': (3.4, 1.375, 6.1, '3.4'), '4.6um': (4.6, 1.375, 6.4, '4.6'),
+                         '12um': (12., 1.375, 6.5, '12'),
+                         '22um': (22., 1.375, 12, '22')}
             }
+            self._str_filter = dictionary[telescope][str_wavelength][3]
             self._psf_FWHM = dictionary[telescope][str_wavelength][2] / dictionary[telescope][str_wavelength][
                 1]  # pixels
             self._psf = None
@@ -399,7 +411,7 @@ class Image(object):
         sources_tb = cat.to_table()
         if self._coord:
             x, y = [int(i) for i in self._coord_pix]
-            label = segment_map.data[y,x]
+            label = segment_map.data[y, x]
         else:
             max_area = 0.
             label = 0
@@ -625,6 +637,7 @@ class Image(object):
             mea_big_ap, med_big_ap, std_big_ap = sigma_clipped_stats(np.array(big_ap))
             cat_world[i]['mean'] = mea_big_ap
             cat_world[i]['std'] = std_big_ap
+            cat_world[i]['radius'] = clean_ra
             for a in range(-clean_ra, clean_ra + 1):
                 for b in range(-clean_ra, clean_ra + 1):
                     if sqrt(a ** 2 + b ** 2) <= clean_ra:
@@ -640,45 +653,52 @@ class Image(object):
         self._image_cleaned_simple = image_cleaned
         self._sources_overlap = cat_world
 
-    def get_galaxy_model(self, boxsize=10, filter_size=3):
+    def get_galaxy_model(self, boxsize=10, filter_size=3, plot=False, percent=98.,
+                         xlim=False, ylim=False):
         sample = self._image_cleaned_simple.copy()
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
         bkg = Background2D(sample, (boxsize, boxsize), filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+
+        if plot:
+            norm = simple_norm(bkg.background, stretch='asinh', percent=percent)
+            plt.imshow(bkg.background, cmap='gray', origin='lower', norm=norm)
+            if xlim and ylim:
+                plt.xlim(xlim[0], xlim[1])
+                plt.ylim(ylim[0], ylim[1])
+
         self._galaxy_model = bkg.background
 
-
-    def get_sources_segmentation(self, thres=5.):
+    def get_sources_segmentation(self, thres=5., deblend_contrast=0.001, deblend_nlevels=8):
         sources = self._data_subbkg - self._galaxy_model
         sources -= sigma_clipped_stats(sources)[0]
         mea, med, std = sigma_clipped_stats(sources)
         kernel = make_2dgaussian_kernel(self._psf_FWHM, size=5)
         convolved_data = convolve(sources, kernel)
-        finder = SourceFinder(npixels=10, progress_bar=False)
+        finder = SourceFinder(npixels=10, contrast=deblend_contrast, nlevels=deblend_nlevels, progress_bar=False)
         segment_map = finder(convolved_data, thres * std)
 
         self._sources_segmentation = segment_map
 
     def remove_sources(self, interaction=False, plot=False, percent=98.,
-                              xlim=False, ylim=False):
+                       xlim=False, ylim=False):
         sample = self._image_cleaned_simple.copy()
         segment_map = self._sources_segmentation
-        stars_label = []
         cat_world = self._sources_overlap
         w = WCS(self._header)
         for i in range(len(cat_world)):
             sky = SkyCoord(cat_world['Ra'][i], cat_world['Dec'][i], frame='icrs', unit='deg')
             x, y = w.world_to_pixel(sky)
             xc, yc = int(x), int(y)
-            stars_label.append((segment_map.data[yc, xc], cat_world[i]['mean'], cat_world[i]['std']))
-        for a in range(np.shape(sample)[0]):
-            for b in range(np.shape(sample)[0]):
-                label = segment_map.data[b, a]
-                for i in range(len(stars_label)):
-                    if stars_label[i][0] == label:
-                        sample[b, a] = random.gauss(stars_label[i][1], stars_label[i][2])
-                        break
+            label = segment_map.data[yc, xc]
+            radius = int(cat_world[i]['radius'])
+            mea = cat_world[i]['mean']
+            std = cat_world[i]['std']
+            for a in range(-2 * radius, 2 * radius):
+                for b in range(-2 * radius, 2 * radius):
+                    if segment_map.data[yc + b, xc + a] == label:
+                        sample[yc + b, xc + a] = random.gauss(mea, std)
 
         if plot:
             norm = simple_norm(sample, stretch='asinh', percent=percent)
@@ -688,12 +708,6 @@ class Image(object):
                 plt.ylim(ylim[0], ylim[1])
 
         self._image_cleaned = sample
-
-
-
-
-
-
 
     def get_error(self, r=(10, 20, 30), nexample=50):
         '''
@@ -748,7 +762,7 @@ class Atlas(object):
                      '22um': (22., 1.375, 12)}
         }
 
-    def match_images(self, match_header=None):
+    def match_images(self, id=None, match_header=None, make_fits=False):
         '''
         Get a new list of images with matched resolution, pixel scale, and size.
         Parameter
@@ -811,7 +825,16 @@ class Atlas(object):
         self._header = match_header
         self._wavelength = wavelength  # um
         self._fwhm = max(fwhm_list)
-        return rpj_img_list
+
+        if make_fits:
+            os.makedirs('matched_images')
+            for i in range(len(img_list)):
+                tele_name = img_list[i]._str_telescope
+                filt_name = img_list[i]._str_filter
+                hdu_pri = fits.PrimaryHDU(rpj_img_list[i], header=match_header)
+                hdul_new = fits.HDUList([hdu_pri])
+                hdul_new.writeto('matched_images/NGC{}_{}_{}_matched.fits'.format(str(id), tele_name, filt_name),
+                                 overwrite=True)
 
     def get_target_coord_pix(self):
         '''
