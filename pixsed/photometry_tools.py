@@ -41,7 +41,7 @@ class Image(object):
     '''
 
     def __init__(self, data, header, target_coordinate=None, psf_fwhm=None,
-                 str_wavelength=None, str_telescope=None):
+                 str_wavelength=None, str_telescope=None, str_filter=None):
         '''
         Parameters
         ----------
@@ -70,7 +70,7 @@ class Image(object):
             self._psf_FWHM = psf_fwhm  # pixels
             self._psf = None
 
-        if target_coordinate is not None:
+        if target_coordinate:
             w = self._wcs
             self._ra, self._dec = target_coordinate
             self._coord = read_coordinate(self._ra, self._dec)
@@ -79,7 +79,7 @@ class Image(object):
         else:
             self._ra, self._dec, self._coord = None, None, None
 
-    def background_model(self, box_size=50, filter_size=3, plot=False):
+    def background_model(self, box_size=50, filter_size=3):
         '''
         Generate the background model.Using median background method.
         Parameter
@@ -88,8 +88,6 @@ class Image(object):
             The size used to calculate the local median.
         filter_size: int.
             The kernel size used to smooth the background model.
-        plot: bool.
-            If True, it will plot the background model.
         '''
         img = self._data.copy()
         mask_background = self._mask_background
@@ -99,9 +97,12 @@ class Image(object):
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
         self._background_model = bkg.background
 
-        if plot:
-            plt.imshow(bkg.background, cmap='gray', origin='lower')
-            plt.colorbar()
+    def plot_background_model(self, percentile=98.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._data, cmap='gray', norm=norm, origin='lower')
+        ax[1].imshow(self._background_model, cmap='gray', origin='lower')
 
     def background_properties(self, mask_type='quick', sigma=3, maxiters=5, **kwargs):
         '''
@@ -145,7 +146,7 @@ class Image(object):
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-    def background_subtract(self, method='full', plot=False, percent=99., xlim=False, ylim=False):
+    def background_subtract(self, method='full'):
         '''
         Remove the background of the image data.
         Parameter
@@ -166,12 +167,13 @@ class Image(object):
             assert hasattr(self, '_background_model'), 'Please run background_model() first!'
             self._data_subbkg -= self._background_model
 
-        if plot:
-            norm = simple_norm(self._data_subbkg, stretch='asinh', percent=percent)
-            plt.imshow(self._data_subbkg, cmap='gray', origin='lower', norm=norm)
-            if xlim and ylim:
-                plt.xlim(xlim[0], xlim[1])
-                plt.ylim(ylim[0], ylim[1])
+    def plot_background_subtract(self, percentile1=98., percentile2=98.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm1 = simple_norm(self._data, percent=percentile1, stretch='asinh')
+        ax[0].imshow(self._data, cmap='gray', norm=norm1, origin='lower')
+        norm2 = simple_norm(self._data_subbkg, percent=percentile2, stretch='asinh')
+        ax[1].imshow(self._data_subbkg, cmap='gray', norm=norm2, origin='lower')
 
     def detect_segmentation(self, threshold, fwhm=3, size=5, npixels=10,
                             deblend=False, nlevels=32, contrast=0.001,
@@ -204,8 +206,7 @@ class Image(object):
                                                    convolved_data=convolved_data)
 
     def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.33, plot=False, percent=98.,
-                            xlim=False, ylim=False):
+                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3):
         '''
         Get the foreground stars that overlap with the target galaxy. Use Gaia xmatch to make sure that the all the
         stars in the list are foreground stars (not a structure of the target galaxy or something).
@@ -224,10 +225,6 @@ class Image(object):
             The max distance of the stars which will be picked out. kpc.
         xmatch_plxerror: float.
             The max rate of the error of parallax over the parallax.
-        plot: bool.
-            If True, will plot the background subtracted image.
-        percent: float.
-        xlim, ylim: tuple.
         Return
         ---------
         A table contains Ra, Dec, and Gmag.
@@ -267,30 +264,45 @@ class Image(object):
         front_stars_world = Table(
             names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])  # Build up the final foreground stars table.
         for j in range(len(front_stars_set)):
-            #x_t, y_t = w.world_to_pixel(SkyCoord(front_stars_list[j][0],front_stars_list[j][1], unit='deg'))
-            #center_distance = sqrt((x_t - self._coord_pix[0]) ** 2 +
-            #                       (y_t - self._coord_pix[1]) ** 2) * self._pxs
-            #if center_distance <= xmatch_radius:
-            #    continue
+            x_t, y_t = w.world_to_pixel(SkyCoord(front_stars_list[j][0], front_stars_list[j][1], unit='deg'))
+            center_distance = sqrt((x_t - self._coord_pix[0]) ** 2 +
+                                   (y_t - self._coord_pix[1]) ** 2) * self._pxs
+            if center_distance <= xmatch_radius:
+                continue
             front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2], 0, 0, 0])
 
-        if plot:
-            plot_tb = Table(names=['x', 'y'])
-            for i in range(len(front_stars_world)):
-                plot_sky_coord = SkyCoord(front_stars_world[i]['Ra'], front_stars_world[i]['Dec'], unit='deg')
-                plot_x, plot_y = w.world_to_pixel(plot_sky_coord)
-                plot_tb.add_row([plot_x, plot_y])
-            positions = np.transpose((plot_tb['x'], plot_tb['y']))
-            apertures = CircularAperture(positions, r=4.0)
-            norm = simple_norm(self._data_subbkg, stretch='asinh', percent=percent)
-            plt.imshow(self._data_subbkg, cmap='gray', origin='lower', norm=norm)
-            apertures.plot(color='blue', lw=5, alpha=0.5)
-            if xlim and ylim:
-                plt.xlim(xlim[0], xlim[1])
-                plt.ylim(ylim[0], ylim[1])
-
         self._sources_overlap = front_stars_world
-        return front_stars_world
+
+    def plot_sources_overlap(self, percentile=98., xlim=None, ylim=None, zoomin=None):
+        w = self._wcs
+        front_stars_world = self._sources_overlap
+        plot_tb = Table(names=['x', 'y'])
+        for i in range(len(front_stars_world)):
+            plot_sky_coord = SkyCoord(front_stars_world[i]['Ra'], front_stars_world[i]['Dec'], unit='deg')
+            plot_x, plot_y = w.world_to_pixel(plot_sky_coord)
+            plot_tb.add_row([plot_x, plot_y])
+        positions = np.transpose((plot_tb['x'], plot_tb['y']))
+        apertures = CircularAperture(positions, r=4.0)
+
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
+        ax[1].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
+        apertures.plot(color='blue', lw=5, alpha=0.5)
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._data)[0]
+            yl = np.shape(self._data)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
     def get_isophote(self, plot=False):
         '''
@@ -367,7 +379,7 @@ class Image(object):
         if plot:
             self._rp.plot()
 
-    def mask_background(self, plot=False):
+    def mask_background(self):
         '''
         Get the mask of the target galaxy and all the sources on the background.
         Parameter
@@ -379,10 +391,14 @@ class Image(object):
         mask_galaxy = self._mask_galaxy
         self._mask_background = mask_stars + mask_galaxy
 
-        if plot:
-            plt.imshow(mask_stars + mask_galaxy, cmap='gray', origin='lower')
+    def plot_mask_background(self, percentile=98.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data, stretch='asinh', percent=percentile)
+        ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
+        ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
 
-    def mask_galaxy(self, thres=1, iter=10, kernel_fwhm=5., kernel_size=5, plot=False):
+    def mask_galaxy(self, thres=1., iter=3, kernel_size=None):
         '''
         Get the mask of the target galaxy.
         Assuming that there is only one target object on the background.
@@ -402,9 +418,15 @@ class Image(object):
             The smaller, the more expansive. Should be less than 1.0 .
         plot: bool.
         '''
+        if not kernel_size:
+            psf = self._psf_FWHM  # pixels
+            psf = ceil(psf)
+            if psf % 2 != 1:
+                psf += 1
+            kernel_size = psf
         mea, med, std = self.background_properties()
         img_sub = self._data - med
-        kernel = make_2dgaussian_kernel(fwhm=3., size=5)  # FWHM = 3.0
+        kernel = make_2dgaussian_kernel(fwhm=3, size=5)
         convolved_data = convolve(img_sub, kernel)
         segment_map = detect_sources(convolved_data, thres * std, npixels=12)
         cat = SourceCatalog(img_sub, segment_map, convolved_data=convolved_data)
@@ -420,17 +442,21 @@ class Image(object):
                     max_area = sources_tb[i]['area']
                     label = sources_tb[i]['label']
         mask_galaxy = segment_map == label
-        kernel_galaxy = make_2dgaussian_kernel(kernel_fwhm, size=kernel_size)
+        kernel_galaxy = make_2dgaussian_kernel(7, size=kernel_size)
         for i in range(iter):
             mask_galaxy = convolve(mask_galaxy, kernel_galaxy)
             mask_galaxy = mask_galaxy != 0
         self._mask_galaxy = mask_galaxy
 
-        if plot:
-            plt.imshow(mask_galaxy, cmap='gray', origin='lower')
+    def plot_mask_galaxy(self, percentile=98.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data, stretch='asinh', percent=percentile)
+        ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
+        ax[1].imshow(self._mask_galaxy, cmap='gray', origin='lower')
 
-    def mask_stars(self, thres=4., thres_area=800, iter_point=3, iter_extend=5, kernel_fwhm_point=7.,
-                   kernel_size_point=7, kernel_fwhm_extend=11., kernel_size_extend=11, plot=False):
+    def mask_stars(self, thres=4., thres_area=8, iter_point=3, iter_extend=5,
+                   kernel_size_point=None, kernel_size_extend=None):
         '''
         Get the mask of the background stars sources, including the expansive stars as well as the point stars.
         Parameter
@@ -454,11 +480,23 @@ class Image(object):
         plot: bool.
         '''
         assert hasattr(self, '_mask_galaxy'), 'Please run mask_galaxy() first!'
+        if not kernel_size_point:
+            psf = self._psf_FWHM  # pixels
+            psf = ceil(psf)
+            if psf % 2 != 1:
+                psf += 1
+            kernel_size_point = psf
+        if not kernel_size_extend:
+            psf = self._psf_FWHM  # pixels
+            psf = ceil(psf)
+            if psf % 2 != 1:
+                psf += 1
+            kernel_size_extend = psf
         galaxy_mask = self._mask_galaxy
         mea, med, std = self._bkg_mean, self._bkg_median, self._bkg_std
         img_sub = self._data - med
 
-        kernel = make_2dgaussian_kernel(fwhm=2 * self._psf_FWHM, size=5)
+        kernel = make_2dgaussian_kernel(fwhm=self._psf_FWHM, size=5)
         convolved_data = convolve(img_sub, kernel)
         segment_map = detect_sources(convolved_data, thres * std, npixels=12, mask=galaxy_mask)
         cat = SourceCatalog(img_sub, segment_map, convolved_data=convolved_data)
@@ -466,7 +504,7 @@ class Image(object):
         extend_label = []
         point_label = []
         for i in range(len(sources_tb)):
-            if sources_tb[i]['area'].value >= thres_area:
+            if sources_tb[i]['area'].value >= thres_area * np.pi * (self._psf_FWHM ** 2):
                 extend_label.append(sources_tb[i]['label'])
             else:
                 point_label.append(sources_tb[i]['label'])
@@ -475,8 +513,8 @@ class Image(object):
         for i in extend_label:
             mask_extend = mask_extend + (segment_map.data == i)
         mask_point = segment_map.data != 0
-        kernel_point = make_2dgaussian_kernel(kernel_fwhm_point, size=kernel_size_point)
-        kernel_extend = make_2dgaussian_kernel(kernel_fwhm_extend, size=kernel_size_extend)
+        kernel_point = make_2dgaussian_kernel(7., size=kernel_size_point)
+        kernel_extend = make_2dgaussian_kernel(7., size=kernel_size_extend)
 
         for i in range(iter_extend):
             mask_extend = convolve(mask_extend, kernel_extend)
@@ -491,8 +529,12 @@ class Image(object):
         self._mask_point = mask_point
         self._mask_extend = mask_extend
 
-        if plot:
-            plt.imshow(mask_stars, cmap='gray', origin='lower')
+    def plot_mask_stars(self, percentile=98.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data, stretch='asinh', percent=percentile)
+        ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
+        ax[1].imshow(self._mask_stars, cmap='gray', origin='lower')
 
     def mask_segmentation(self, kernel_fwhm=None, kernel_size=5):
         '''
@@ -563,8 +605,7 @@ class Image(object):
         ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
         return ax
 
-    def remove_sources_simple(self, l_half=18, catalog=None, plot=False, percent=98.,
-                              xlim=False, ylim=False):
+    def remove_sources_simple(self, l_half=18, catalog=None):
         '''
         Remove the contaminating sources in the image. Should run mask_stars() first.
         Parameter
@@ -643,34 +684,59 @@ class Image(object):
                     if sqrt(a ** 2 + b ** 2) <= clean_ra:
                         image_cleaned[yc + b, xc + a] = random.gauss(mea_big_ap, std_big_ap)
 
-        if plot:
-            norm = simple_norm(image_cleaned, stretch='asinh', percent=percent)
-            plt.imshow(image_cleaned, cmap='gray', origin='lower', norm=norm)
-            if xlim and ylim:
-                plt.xlim(xlim[0], xlim[1])
-                plt.ylim(ylim[0], ylim[1])
-
         self._image_cleaned_simple = image_cleaned
         self._sources_overlap = cat_world
 
-    def get_galaxy_model(self, boxsize=10, filter_size=3, plot=False, percent=98.,
-                         xlim=False, ylim=False):
+    def plot_remove_sources_simple(self, percentile=99., xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
+        ax[1].imshow(self._image_cleaned_simple, cmap='gray', norm=norm, origin='lower')
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._data_subbkg)[0]
+            yl = np.shape(self._data_subbkg)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+
+    def get_galaxy_model(self, boxsize=10, filter_size=3):
         sample = self._image_cleaned_simple.copy()
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
         bkg = Background2D(sample, (boxsize, boxsize), filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
 
-        if plot:
-            norm = simple_norm(bkg.background, stretch='asinh', percent=percent)
-            plt.imshow(bkg.background, cmap='gray', origin='lower', norm=norm)
-            if xlim and ylim:
-                plt.xlim(xlim[0], xlim[1])
-                plt.ylim(ylim[0], ylim[1])
-
         self._galaxy_model = bkg.background
 
-    def get_sources_segmentation(self, thres=5., deblend_contrast=0.001, deblend_nlevels=8):
+    def plot_galaxy_model(self, percentile=99.9, xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._image_cleaned_simple, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._image_cleaned_simple, cmap='gray', norm=norm, origin='lower')
+        ax[1].imshow(self._galaxy_model, cmap='gray', norm=norm, origin='lower')
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._image_cleaned_simple)[0]
+            yl = np.shape(self._image_cleaned_simple)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+
+    def get_sources_segmentation(self, thres=3., deblend_contrast=0.001, deblend_nlevels=8):
         sources = self._data_subbkg - self._galaxy_model
         sources -= sigma_clipped_stats(sources)[0]
         mea, med, std = sigma_clipped_stats(sources)
@@ -680,6 +746,48 @@ class Image(object):
         segment_map = finder(convolved_data, thres * std)
 
         self._sources_segmentation = segment_map
+        self._data_sources = sources
+
+    def plot_sources(self, percentile=99., xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm1 = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm1, origin='lower')
+        norm2 = simple_norm(self._data_sources, percent=percentile, stretch='asinh')
+        ax[1].imshow(self._data_sources, cmap='gray', norm=norm2, origin='lower')
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._data_subbkg)[0]
+            yl = np.shape(self._data_subbkg)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+
+    def plot_sources_segmentation(self, percentile=99., xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
+        ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
+        ax[1].imshow(self._sources_segmentation, cmap=self._sources_segmentation.cmap, origin='lower')
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._data_subbkg)[0]
+            yl = np.shape(self._data_subbkg)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
     def remove_sources(self, interaction=False, plot=False, percent=98.,
                        xlim=False, ylim=False):
@@ -709,7 +817,28 @@ class Image(object):
 
         self._image_cleaned = sample
 
-    def get_error(self, r=(10, 20, 30), nexample=50):
+    def plot_remove_sources(self, percentile1=99., percentile2=99.95,xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        ax = ax.ravel()
+        norm1 = simple_norm(self._data_subbkg, percent=percentile1, stretch='asinh')
+        ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm1, origin='lower')
+        norm2 = simple_norm(self._image_cleaned, percent=percentile2, stretch='asinh')
+        ax[1].imshow(self._image_cleaned, cmap='gray', norm=norm2, origin='lower')
+        if xlim and ylim:
+            ax[0].set_xlim(xlim[0], xlim[1])
+            ax[0].set_ylim(ylim[0], ylim[1])
+            ax[1].set_xlim(xlim[0], xlim[1])
+            ax[1].set_ylim(ylim[0], ylim[1])
+        elif zoomin:
+            rate = 1 / (zoomin / 100)
+            xl = np.shape(self._data_subbkg)[0]
+            yl = np.shape(self._data_subbkg)[1]
+            ax[0].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[0].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+            ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
+            ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
+
+    def get_error(self, r=(10, 20, 30, 40, 50), nexample=50):
         '''
         Get the relationship between log10(std) and log10(area).
         Parameter
@@ -737,6 +866,15 @@ class Image(object):
         y_fit = [log10(j) for j in error_list]
         fitted_line = fit(line_init, x_fit, y_fit)
         self._error_log_line = fitted_line
+
+    def plot_error(self):
+        error_line = self._error_log_line
+        error = lambda xr: (10 ** error_line(log10(np.pi * (xr ** 2))))
+        x = [i for i in range(1, 100)]
+        y = [error(i) for i in x]
+        plt.plot(x, y)
+        plt.xlabel('aperture radius / asec')
+        plt.ylabel('std / Jy')
 
 
 class Atlas(object):
