@@ -15,7 +15,9 @@ from astropy.visualization import simple_norm
 from astropy.wcs import WCS
 from astropy.modeling import models, fitting
 from astropy.io import fits
+from astropy.nddata import NDData
 from astroquery.xmatch import XMatch
+from photutils.psf import EPSFBuilder, extract_stars
 from photutils.aperture import CircularAperture
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
@@ -98,7 +100,7 @@ class Image(object):
         self._background_model = bkg.background
 
     def plot_background_model(self, percentile=98.):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data, cmap='gray', norm=norm, origin='lower')
@@ -168,7 +170,7 @@ class Image(object):
             self._data_subbkg -= self._background_model
 
     def plot_background_subtract(self, percentile1=98., percentile2=98.):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm1 = simple_norm(self._data, percent=percentile1, stretch='asinh')
         ax[0].imshow(self._data, cmap='gray', norm=norm1, origin='lower')
@@ -233,14 +235,17 @@ class Image(object):
         assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
         # initial detection
         mask_galaxy = self._mask_galaxy
-        mask = mask_galaxy == False
         daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_FWHM)
-        sources = daofind(self._data_subbkg, mask=mask)
+        sources = daofind(self._data_subbkg)
         # Gaia Xmatch
         w = self._wcs
         sources_world = Table(names=['Ra', 'Dec'])  # build up table used for xmatch.
         if sources:
             for i in range(len(sources)):
+                x = int(sources['xcentroid'][i])
+                y = int(sources['ycentroid'][i])
+                if not mask_galaxy[y, x]:
+                    continue
                 sky = w.pixel_to_world(sources['xcentroid'][i], sources['ycentroid'][i])
                 sources_world.add_row([sky.ra, sky.dec])
             t_o = XMatch.query(cat1=sources_world,
@@ -284,7 +289,7 @@ class Image(object):
         positions = np.transpose((plot_tb['x'], plot_tb['y']))
         apertures = CircularAperture(positions, r=4.0)
 
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
@@ -317,7 +322,7 @@ class Image(object):
         self._isolist = None
         self._ellipse_model = None
 
-    def get_psf(self, method='direct', plot=False):
+    def get_psf(self, method='direct', thres=20., half_length=4, oversample=4, iter=1, nsamples=500):
         '''
         Get the PSF model. (May include other properties of the PSF.)
         
@@ -325,6 +330,7 @@ class Image(object):
         ----------
         method: str
             if method is 'direct', it will get the psf fwhm directly from the Clark's paper.
+            if method is 'full', it will build up the psf model from the image.
         plot : bool (default: False)
             Plot the information to show the psf building procedure.
         '''
@@ -347,6 +353,68 @@ class Image(object):
                 1]  # pixels
             self._psf = None
             self._pxs = dictionary[telescope][str_wavelength][1]
+        else:
+            hl = int(half_length * self._psf_FWHM)  # pixels
+            good_label = []
+            mea, med, std = sigma_clipped_stats(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
+            daofind = DAOStarFinder(fwhm=self._psf_FWHM, threshold=thres * std)
+            sources = daofind(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
+            # step 1
+            flux_box = sources['flux']
+            peak_box = sources['peak']
+            fmea, fmed, fstd = sigma_clipped_stats(np.array(flux_box))
+            pmea, pmed, pstd = sigma_clipped_stats(np.array(peak_box))
+            for i in range(len(sources)):
+                if fmea - 3 * fstd <= sources[i]['flux'] <= fmea + 3 * fstd and pmea - 3 * pstd <= sources[i][
+                    'peak'] <= pmea + 3 * pstd:
+                    good_label.append(i)
+            # step 2
+            good_label1 = []
+            for label in good_label:
+                xc = int(sources[label]['xcentroid'])
+                yc = int(sources[label]['ycentroid'])
+                if xc < 3 * hl or xc > np.shape(self._data_subbkg)[0] - 3 * hl or yc < 3 * hl or yc > np.shape(
+                        self._data_subbkg)[1] - 3 * hl:
+                    continue
+                good_label1.append(label)
+            # step 3
+            nddata = NDData(data=self._data_subbkg)
+            selected_stars_tbl = Table(names=['x', 'y'])
+            count = 0
+            if not nsamples:
+                nsamples = len(good_label1)
+            for label in good_label1:
+                if count > nsamples:
+                    break
+                temp = [sources[label]['xcentroid'], sources[label]['ycentroid']]
+                selected_stars_tbl.add_row(temp)
+                count += 1
+            selected_stars = extract_stars(nddata, selected_stars_tbl, size=2 * hl - 1)
+            epsf_builder = EPSFBuilder(oversampling=oversample, maxiters=iter, smoothing_kernel='quadratic',
+                                       progress_bar=False)
+            epsf, fitted_stars = epsf_builder(selected_stars)
+            self._psf = epsf.data
+            self._psf_oversample = oversample
+
+    def plot_psf_model(self, percentile=99.):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
+        ax = ax.ravel()
+        psf_model = self._psf
+        norm = simple_norm(psf_model, stretch='sqrt', percent=percentile)
+        ax[0].imshow(psf_model, norm=norm, origin='lower')
+        min_radius = 0.0
+        max_radius = np.shape(psf_model)[0] // 2 - 1
+        radius_step = 1
+        xc = (np.shape(psf_model)[0] - 1) // 2
+        yc = (np.shape(psf_model)[1] - 1) // 2
+        rp = RadialProfile(psf_model, (xc, yc), min_radius, max_radius, radius_step,
+                           error=None, mask=None)
+        x = rp.radius
+        x = [self._pxs * (i / self._psf_oversample) for i in x]
+        y = rp.profile
+        ax[1].plot(x, y)
+        ax[1].set_xlabel('radius / asec')
+        ax[1].set_ylabel('intense')
 
     def get_radial_profile(self, data, ra_max, step=1., mask=None, kind='linear', plot=False):
         '''
@@ -392,13 +460,13 @@ class Image(object):
         self._mask_background = mask_stars + mask_galaxy
 
     def plot_mask_background(self, percentile=98.):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data, stretch='asinh', percent=percentile)
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
 
-    def mask_galaxy(self, thres=1., iter=3, kernel_size=None):
+    def mask_galaxy(self, thres=1., iter=5, kernel_size=None):
         '''
         Get the mask of the target galaxy.
         Assuming that there is only one target object on the background.
@@ -449,13 +517,13 @@ class Image(object):
         self._mask_galaxy = mask_galaxy
 
     def plot_mask_galaxy(self, percentile=98.):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data, stretch='asinh', percent=percentile)
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_galaxy, cmap='gray', origin='lower')
 
-    def mask_stars(self, thres=4., thres_area=8, iter_point=3, iter_extend=5,
+    def mask_stars(self, thres=4., thres_area=100, iter_point=3, iter_extend=5,
                    kernel_size_point=None, kernel_size_extend=None):
         '''
         Get the mask of the background stars sources, including the expansive stars as well as the point stars.
@@ -530,7 +598,7 @@ class Image(object):
         self._mask_extend = mask_extend
 
     def plot_mask_stars(self, percentile=98.):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data, stretch='asinh', percent=percentile)
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
@@ -688,7 +756,7 @@ class Image(object):
         self._sources_overlap = cat_world
 
     def plot_remove_sources_simple(self, percentile=99., xlim=None, ylim=None, zoomin=None):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
@@ -707,7 +775,13 @@ class Image(object):
             ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
-    def get_galaxy_model(self, boxsize=10, filter_size=3):
+    def get_galaxy_model(self, boxsize=None, filter_size=None):
+        if not boxsize:
+            psf = self._psf_FWHM
+            psf = ceil(psf)
+            boxsize = 2 * psf - 1
+        if not filter_size:
+            filter_size = ceil(boxsize / 2)
         sample = self._image_cleaned_simple.copy()
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
@@ -717,7 +791,7 @@ class Image(object):
         self._galaxy_model = bkg.background
 
     def plot_galaxy_model(self, percentile=99.9, xlim=None, ylim=None, zoomin=None):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._image_cleaned_simple, percent=percentile, stretch='asinh')
         ax[0].imshow(self._image_cleaned_simple, cmap='gray', norm=norm, origin='lower')
@@ -749,7 +823,7 @@ class Image(object):
         self._data_sources = sources
 
     def plot_sources(self, percentile=99., xlim=None, ylim=None, zoomin=None):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm1 = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm1, origin='lower')
@@ -770,7 +844,7 @@ class Image(object):
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
     def plot_sources_segmentation(self, percentile=99., xlim=None, ylim=None, zoomin=None):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
@@ -789,8 +863,7 @@ class Image(object):
             ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
-    def remove_sources(self, interaction=False, plot=False, percent=98.,
-                       xlim=False, ylim=False):
+    def remove_sources(self, interaction=False):
         sample = self._image_cleaned_simple.copy()
         segment_map = self._sources_segmentation
         cat_world = self._sources_overlap
@@ -803,22 +876,14 @@ class Image(object):
             radius = int(cat_world[i]['radius'])
             mea = cat_world[i]['mean']
             std = cat_world[i]['std']
-            for a in range(-2 * radius, 2 * radius):
-                for b in range(-2 * radius, 2 * radius):
+            for a in range(-2 * radius, 2 * radius + 1):
+                for b in range(-2 * radius, 2 * radius + 1):
                     if segment_map.data[yc + b, xc + a] == label:
                         sample[yc + b, xc + a] = random.gauss(mea, std)
-
-        if plot:
-            norm = simple_norm(sample, stretch='asinh', percent=percent)
-            plt.imshow(sample, cmap='gray', origin='lower', norm=norm)
-            if xlim and ylim:
-                plt.xlim(xlim[0], xlim[1])
-                plt.ylim(ylim[0], ylim[1])
-
         self._image_cleaned = sample
 
-    def plot_remove_sources(self, percentile1=99., percentile2=99.95,xlim=None, ylim=None, zoomin=None):
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 5))
+    def plot_remove_sources(self, percentile1=99., percentile2=99.95, xlim=None, ylim=None, zoomin=None):
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm1 = simple_norm(self._data_subbkg, percent=percentile1, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm1, origin='lower')
