@@ -61,6 +61,7 @@ class Image(object):
         self._header = header
         self._shape = data.shape
         self._wcs = WCS(header)
+        self._pxs = (abs(self._header['CDELT1']) * 3600.)
         if str_wavelength is None:
             self._str_wavelength = self._header['WVLNGTH'].split()[0]
         if str_telescope is None:
@@ -352,7 +353,6 @@ class Image(object):
             self._psf_FWHM = dictionary[telescope][str_wavelength][2] / dictionary[telescope][str_wavelength][
                 1]  # pixels
             self._psf = None
-            self._pxs = dictionary[telescope][str_wavelength][1]
         else:
             hl = int(half_length * self._psf_FWHM)  # pixels
             good_label = []
@@ -703,6 +703,7 @@ class Image(object):
             for yc in range(y_len):
                 if self._mask_stars[xc, yc]:
                     image_cleaned[xc, yc] = random.gauss(new_bkg_mea, new_bkg_std)
+        self._image_cleaned_background = image_cleaned.copy()
         # clean stars that overlap with the target galaxy.
         if catalog is None:
             cat_world = self._sources_overlap
@@ -726,7 +727,7 @@ class Image(object):
             min_radius = 0.0
             max_radius = length
             radius_step = 1.0
-            rp = RadialProfile(image_cleaned, (xc, yc), min_radius, max_radius, radius_step)
+            rp = RadialProfile(self._data_subbkg, (xc, yc), min_radius, max_radius, radius_step)
             h = rp.profile
             r = rp.radius
             flag = True
@@ -735,7 +736,7 @@ class Image(object):
                 if (h[d] < mea_sample + 2 * std_sample) and flag:
                     clean_ra = int(r[d])
                     flag = False
-            if clean_ra == 0 or clean_ra > 8 * fwhm:
+            if clean_ra == 0 or clean_ra > 10 * fwhm:
                 clean_ra = int(2 * fwhm)
             big_ra = 2 * clean_ra
             big_ap = []
@@ -864,7 +865,7 @@ class Image(object):
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
     def remove_sources(self, interaction=False):
-        sample = self._image_cleaned_simple.copy()
+        sample = self._image_cleaned_background.copy()
         segment_map = self._sources_segmentation
         cat_world = self._sources_overlap
         w = WCS(self._header)
@@ -876,6 +877,8 @@ class Image(object):
             radius = int(cat_world[i]['radius'])
             mea = cat_world[i]['mean']
             std = cat_world[i]['std']
+            data_box = []
+
             for a in range(-2 * radius, 2 * radius + 1):
                 for b in range(-2 * radius, 2 * radius + 1):
                     if segment_map.data[yc + b, xc + a] == label:
@@ -919,7 +922,7 @@ class Image(object):
         '''
         img_error = self._data_subbkg.copy()
         mask = self._mask_background
-        pxs = (abs(self._header['CDELT1']) * 3600.)
+        pxs = self._pxs
         error_list = []
         for rr in r:
             error_list.append(circular_error_estimate(img_error, mask, rr, nexample))
