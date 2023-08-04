@@ -37,61 +37,89 @@ mpl.rc("ytick.minor", width=1., size=5)
 
 
 class Image(object):
-    '''
-    The class of an image. For the moment, we only assume that there is one 
+    """
+    The class of an image. For the moment, we only assume that there is one
     science target in the image.
-    '''
+    """
 
-    def __init__(self, data, header, target_coordinate=None, psf_fwhm=None,
-                 str_wavelength=None, str_telescope=None, str_filter=None):
-        '''
+    def __init__(self, data, header, psf_fwhm, target_coordinate, id, wavelength=None,
+                 filter_name=None, telescope_name=None):
+        """
         Parameters
         ----------
         data : numpy 2D array
             The 2D image data.
         header : astropy fits header
             The header of the image data.
+        psf_fwhm : float.
+            The fwhm of the PSF. asec
         target_coordinate : Tuple. Contain two floats.
             The Ra and Dec of the target galaxy.
-        psf_fwhm : float.
-            The fwhm of the PSF.
-        '''
+        wavelength: float.
+            The wavelength of this image. um
+        filter_name: string.
+            The filter name of this image.
+        telescope_name: string.
+            The telescope name of this image.
+        """
         self._data_org = data
         self._data = data.copy()
         self._header = header
         self._shape = data.shape
         self._wcs = WCS(header)
         self._pxs = (abs(self._header['CDELT1']) * 3600.)
-        if str_wavelength is None:
-            self._str_wavelength = self._header['WVLNGTH'].split()[0]
-        if str_telescope is None:
-            self._str_telescope = self._header['TELESCOP'].split()[0]
+        self._id = id
+        self._data_subbkg = None
+        self._image_cleaned_simple = None
+        self._image_cleaned = None
+        self._psf_oversample = None
+        self._mask_extend = None
+        self._mask_point = None
+        self._mask_stars = None
+        self._mask_galaxy = None
+        self._background_model = None
+        self._image_cleaned_background = None
+        self._sources_overlap = None
+        self._sources_segmentation = None
+        self._galaxy_model = None
+        self._segmentation = None
+        self._bkg_mean = None
+        self._bkg_median = None
+        self._bkg_std = None
+        self._isolist = None
+        self._ellipse_model = None
+        self._data_sources = None
 
-        if psf_fwhm is None:
-            self.get_psf()
-        else:
-            self._psf_FWHM = psf_fwhm  # pixels
-            self._psf = None
+        self._wavelength = wavelength
 
-        if target_coordinate:
-            w = self._wcs
-            self._ra, self._dec = target_coordinate
-            self._coord = read_coordinate(self._ra, self._dec)
-            ra_pix, dec_pix = w.world_to_pixel(self._coord)
-            self._coord_pix = (float(ra_pix), float(dec_pix))
-        else:
-            self._ra, self._dec, self._coord = None, None, None
+        self._filter = filter_name
 
-    def background_model(self, box_size=50, filter_size=3):
-        '''
+        self._telescope = telescope_name
+
+        self._psf_FWHM = psf_fwhm / self._pxs
+
+        w = self._wcs
+        self._ra, self._dec = target_coordinate
+        self._coord = read_coordinate(self._ra, self._dec)
+        ra_pix, dec_pix = w.world_to_pixel(self._coord)
+        self._coord_pix = (float(ra_pix), float(dec_pix))
+
+    def background_model(self, box_size=None, filter_size=None):
+        """
         Generate the background model.Using median background method.
         Parameter
         ----------
         box_size: int.
             The size used to calculate the local median.
+            If None, the default value is 25 times fwhm.
         filter_size: int.
             The kernel size used to smooth the background model.
-        '''
+            If None, the default value is 3 pixels.
+        """
+        if not box_size:
+            box_size = int(self._psf_FWHM * 25)
+        if not filter_size:
+            filter_size = 3
         img = self._data.copy()
         mask_background = self._mask_background
         sigma_clip = SigmaClip(sigma=3.)
@@ -101,6 +129,13 @@ class Image(object):
         self._background_model = bkg.background
 
     def plot_background_model(self, percentile=98.):
+        """
+        Plot the background model.
+        Parameter
+        -----------
+        percentile: float.
+            The percentile of normalization.
+        """
         fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm = simple_norm(self._data, percent=percentile, stretch='asinh')
@@ -150,18 +185,14 @@ class Image(object):
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
     def background_subtract(self, method='full'):
-        '''
+        """
         Remove the background of the image data.
         Parameter
         ----------
         method: str.
                 If the method is 'simple', the function just uses the median of the image to do the subtraction.
                 If the method is 'full', the function  uses the background model to do the subtraction.
-        plot: bool.
-            If True, will plot the background subtracted image.
-        percent: float.
-        xlim, ylim: tuple.
-        '''
+        """
         self._data_subbkg = self._data.copy()
         if method == 'simple':
             assert hasattr(self, '_bkg_median'), 'Please run background_properties() first!'
@@ -171,6 +202,13 @@ class Image(object):
             self._data_subbkg -= self._background_model
 
     def plot_background_subtract(self, percentile1=98., percentile2=98.):
+        """
+        Plot the background subtracted image.
+        Parameter
+        -----------
+        percentile1: float
+        percentile2: float
+        """
         fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
         ax = ax.ravel()
         norm1 = simple_norm(self._data, percent=percentile1, stretch='asinh')
@@ -209,11 +247,9 @@ class Image(object):
                                                    convolved_data=convolved_data)
 
     def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3):
+                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3, careful=False):
         '''
-        Get the foreground stars that overlap with the target galaxy. Use Gaia xmatch to make sure that the all the
-        stars in the list are foreground stars (not a structure of the target galaxy or something).
-        These sources will have an influence on the measurement,so they should be picked out separately.
+        Get the foreground stars that overlap with the target galaxy.
         Parameter
         -----------
         detect_thres: float.
@@ -258,11 +294,12 @@ class Image(object):
                     if 1 / t_o['Plx'][i] < xmatch_distance and t_o['e_Plx'][i] < xmatch_plxerror * t_o['Plx'][i]:
                         front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
 
-            for i in range(len(t_o)):
-                if t_o['PSS'][i] != '--' or t_o['PQSO'][i] != '--' or t_o['PGal'][i] != '--':
-                    if t_o['PSS'][i] > 0.9 or t_o['PQSO'][i] > 0.9 or t_o['PGal'][i] > 0.9:
-                        if t_o['Plx'][i] > 3.5 * t_o['e_Plx'][i]:
-                            front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
+            if careful:
+                for i in range(len(t_o)):
+                    if t_o['PSS'][i] != '--':
+                        if t_o['PSS'][i] > 0.9:
+                            if t_o['Gmag'][i] < xmatch_gmag:
+                                front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
 
         else:
             front_stars_set = set()
@@ -323,7 +360,7 @@ class Image(object):
         self._isolist = None
         self._ellipse_model = None
 
-    def get_psf(self, method='direct', thres=20., half_length=4, oversample=4, iter=1, nsamples=500):
+    def get_psf(self, thres=20., half_length=10, oversample=4, iter=3, nsamples=300):
         '''
         Get the PSF model. (May include other properties of the PSF.)
         
@@ -335,66 +372,48 @@ class Image(object):
         plot : bool (default: False)
             Plot the information to show the psf building procedure.
         '''
-        if method == 'direct':
-            str_wavelength = self._header['WVLNGTH'].split()[0]
-            telescope = self._header['TELESCOP'].split()[0]
 
-            dictionary = {  # wavelength(um), pixel size(asec), psf fwhm(asec), filter name
-                'GALEX': {'152.8nm': (0.1528, 3.2, 4.3, 'FUV'), '227.1nm': (0.2271, 3.2, 5.3, 'NUV')},
-                'SDSS': {'355.1nm': (0.3551, 0.45, 1.3, 'u'), '468.6nm': (0.4686, 0.45, 1.3, 'g'),
-                         '616.6nm': (0.6166, 0.45, 1.3, 'r'),
-                         '748.0nm': (0.7480, 0.45, 1.3, 'i'), '893.2nm': (0.8932, 0.45, 1.3, 'z')},
-                '2MASS': {'1.25um': (1.25, 1., 2., 'J'), '1.65um': (1.65, 1., 2., 'H'), '2.16um': (2.16, 1., 2., 'Ks')},
-                'WISE': {'3.4um': (3.4, 1.375, 6.1, '3.4'), '4.6um': (4.6, 1.375, 6.4, '4.6'),
-                         '12um': (12., 1.375, 6.5, '12'),
-                         '22um': (22., 1.375, 12, '22')}
-            }
-            self._str_filter = dictionary[telescope][str_wavelength][3]
-            self._psf_FWHM = dictionary[telescope][str_wavelength][2] / dictionary[telescope][str_wavelength][
-                1]  # pixels
-            self._psf = None
-        else:
-            hl = int(half_length * self._psf_FWHM)  # pixels
-            good_label = []
-            mea, med, std = sigma_clipped_stats(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
-            daofind = DAOStarFinder(fwhm=self._psf_FWHM, threshold=thres * std)
-            sources = daofind(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
-            # step 1
-            flux_box = sources['flux']
-            peak_box = sources['peak']
-            fmea, fmed, fstd = sigma_clipped_stats(np.array(flux_box))
-            pmea, pmed, pstd = sigma_clipped_stats(np.array(peak_box))
-            for i in range(len(sources)):
-                if fmea - 3 * fstd <= sources[i]['flux'] <= fmea + 3 * fstd and pmea - 3 * pstd <= sources[i][
-                    'peak'] <= pmea + 3 * pstd:
-                    good_label.append(i)
-            # step 2
-            good_label1 = []
-            for label in good_label:
-                xc = int(sources[label]['xcentroid'])
-                yc = int(sources[label]['ycentroid'])
-                if xc < 3 * hl or xc > np.shape(self._data_subbkg)[0] - 3 * hl or yc < 3 * hl or yc > np.shape(
-                        self._data_subbkg)[1] - 3 * hl:
-                    continue
-                good_label1.append(label)
-            # step 3
-            nddata = NDData(data=self._data_subbkg)
-            selected_stars_tbl = Table(names=['x', 'y'])
-            count = 0
-            if not nsamples:
-                nsamples = len(good_label1)
-            for label in good_label1:
-                if count > nsamples:
-                    break
-                temp = [sources[label]['xcentroid'], sources[label]['ycentroid']]
-                selected_stars_tbl.add_row(temp)
-                count += 1
-            selected_stars = extract_stars(nddata, selected_stars_tbl, size=2 * hl - 1)
-            epsf_builder = EPSFBuilder(oversampling=oversample, maxiters=iter, smoothing_kernel='quadratic',
-                                       progress_bar=False)
-            epsf, fitted_stars = epsf_builder(selected_stars)
-            self._psf = epsf.data
-            self._psf_oversample = oversample
+        hl = int(half_length * self._psf_FWHM)  # pixels
+        good_label = []
+        mea, med, std = sigma_clipped_stats(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
+        daofind = DAOStarFinder(fwhm=self._psf_FWHM, threshold=thres * std)
+        sources = daofind(self._data_subbkg, mask=self._mask_galaxy + self._mask_extend)
+        # step 1
+        flux_box = sources['flux']
+        peak_box = sources['peak']
+        fmea, fmed, fstd = sigma_clipped_stats(np.array(flux_box))
+        pmea, pmed, pstd = sigma_clipped_stats(np.array(peak_box))
+        for i in range(len(sources)):
+            if fmea - 3 * fstd <= sources[i]['flux'] <= fmea + 3 * fstd and pmea - 3 * pstd <= sources[i][
+                'peak'] <= pmea + 3 * pstd:
+                good_label.append(i)
+        # step 2
+        good_label1 = []
+        for label in good_label:
+            xc = int(sources[label]['xcentroid'])
+            yc = int(sources[label]['ycentroid'])
+            if xc < 3 * hl or xc > np.shape(self._data_subbkg)[0] - 3 * hl or yc < 3 * hl or yc > np.shape(
+                    self._data_subbkg)[1] - 3 * hl:
+                continue
+            good_label1.append(label)
+        # step 3
+        nddata = NDData(data=self._data_subbkg)
+        selected_stars_tbl = Table(names=['x', 'y'])
+        count = 0
+        if not nsamples:
+            nsamples = len(good_label1)
+        for label in good_label1:
+            if count > nsamples:
+                break
+            temp = [sources[label]['xcentroid'], sources[label]['ycentroid']]
+            selected_stars_tbl.add_row(temp)
+            count += 1
+        selected_stars = extract_stars(nddata, selected_stars_tbl, size=2 * hl - 1)
+        epsf_builder = EPSFBuilder(oversampling=oversample, maxiters=iter, smoothing_kernel='quadratic',
+                                   progress_bar=False)
+        epsf, fitted_stars = epsf_builder(selected_stars)
+        self._psf = epsf.data
+        self._psf_oversample = oversample
 
     def plot_psf_model(self, percentile=99.):
         fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(20, 10))
@@ -402,12 +421,11 @@ class Image(object):
         psf_model = self._psf
         norm = simple_norm(psf_model, stretch='sqrt', percent=percentile)
         ax[0].imshow(psf_model, norm=norm, origin='lower')
-        min_radius = 0.0
         max_radius = np.shape(psf_model)[0] // 2 - 1
-        radius_step = 1
+        edge_radii = [radii for radii in range(int(max_radius) + 1)]
         xc = (np.shape(psf_model)[0] - 1) // 2
         yc = (np.shape(psf_model)[1] - 1) // 2
-        rp = RadialProfile(psf_model, (xc, yc), min_radius, max_radius, radius_step,
+        rp = RadialProfile(psf_model, (xc, yc), edge_radii,
                            error=None, mask=None)
         x = rp.radius
         x = [self._pxs * (i / self._psf_oversample) for i in x]
@@ -435,10 +453,8 @@ class Image(object):
         plot : bool (default: False)
             Plot the radial profile.
         '''
-        min_radius = 0.0
-        max_radius = ra_max
-        radius_step = step
-        rp = RadialProfile(data, self._coord_pix, min_radius, max_radius, radius_step,
+        edge_radii = [radii for radii in range(0, int(ra_max) + 1, step)]
+        rp = RadialProfile(data, self._coord_pix, edge_radii,
                            error=None, mask=mask)
         x = rp.radius
         y = rp.profile
@@ -466,7 +482,7 @@ class Image(object):
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
 
-    def mask_galaxy(self, thres=1., iter=5, kernel_size=None):
+    def mask_galaxy(self, thres=1., iter=10, kernel_size=None):
         '''
         Get the mask of the target galaxy.
         Assuming that there is only one target object on the background.
@@ -724,10 +740,8 @@ class Image(object):
                     if sqrt(a ** 2 + b ** 2) <= length / 3:
                         mask_sample[length + a, length + b] = True
             mea_sample, med_sample, std_sample = sigma_clipped_stats(sample, maxiters=20, mask=mask_sample)
-            min_radius = 0.0
-            max_radius = length
-            radius_step = 1.0
-            rp = RadialProfile(self._data_subbkg, (xc, yc), min_radius, max_radius, radius_step)
+            edge_radii = [radii for radii in range(0, int(length) + 1)]
+            rp = RadialProfile(self._data_subbkg, (xc, yc), edge_radii)
             h = rp.profile
             r = rp.radius
             flag = True
@@ -736,8 +750,6 @@ class Image(object):
                 if (h[d] < mea_sample + 2 * std_sample) and flag:
                     clean_ra = int(r[d])
                     flag = False
-            if clean_ra == 0 or clean_ra > 10 * fwhm:
-                clean_ra = int(2 * fwhm)
             big_ra = 2 * clean_ra
             big_ap = []
             for a in range(-big_ra, big_ra + 1):
@@ -782,7 +794,7 @@ class Image(object):
             psf = ceil(psf)
             boxsize = 2 * psf - 1
         if not filter_size:
-            filter_size = ceil(boxsize / 2)
+            filter_size = boxsize // 4 * 2 + 1
         sample = self._image_cleaned_simple.copy()
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
@@ -944,6 +956,25 @@ class Image(object):
         plt.xlabel('aperture radius / asec')
         plt.ylabel('std / Jy')
 
+    def save_image(self):
+        header = self._header
+        img = self._image_cleaned
+        os.makedirs('cleaned_images', exist_ok=True)
+        hdu_pri = fits.PrimaryHDU(img, header=header)
+        hdul_new = fits.HDUList([hdu_pri])
+        hdul_new.writeto('cleaned_images/NGC{}_{}_{}_cleaned.fits'.format(str(self._id), self._telescope, self._filter),
+                         overwrite=True)
+
+    def save_psf(self):
+        oversampling = self._psf_oversample
+        img = self._psf
+        os.makedirs('psf_images',exist_ok=True)
+        hdu_pri = fits.PrimaryHDU(img, header=None)
+        hdul_new = fits.HDUList([hdu_pri])
+        hdul_new.writeto(
+            'psf_images/NGC{}_{}_{}_psf_{}.fits'.format(str(self._id), self._telescope, self._filter, oversampling),
+            overwrite=True)
+
 
 class Atlas(object):
     '''
@@ -1084,10 +1115,9 @@ class Atlas(object):
             ra_box = []
             for i in range(len(img_matched_list)):
                 mea, med, std = sigma_clipped_stats(img_matched_list[i], maxiters=5)
-                min_radius = 0.0
                 max_radius = (min(np.shape(img_matched_list[i])[0], np.shape(img_matched_list[i])[1]) // 2) - 5
-                radius_step = 1.0
-                rp = RadialProfile(img_matched_list[i], (xc, yc), min_radius, max_radius, radius_step)
+                edge_radii = [radii for radii in range(int(max_radius) + 1)]
+                rp = RadialProfile(img_matched_list[i], (xc, yc), edge_radii)
                 h = rp.profile
                 ra_t = max_radius
                 for j in range(len(h)):
