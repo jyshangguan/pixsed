@@ -247,7 +247,7 @@ class Image(object):
                                                    convolved_data=convolved_data)
 
     def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3, careful=False):
+                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3, careful=False, safe_radius=5.):
         '''
         Get the foreground stars that overlap with the target galaxy.
         Parameter
@@ -297,8 +297,8 @@ class Image(object):
             if careful:
                 for i in range(len(t_o)):
                     if t_o['PSS'][i] != '--':
-                        if t_o['PSS'][i] > 0.9:
-                            if t_o['Gmag'][i] < xmatch_gmag:
+                        if t_o['PSS'][i] > 0.99:
+                            if t_o['Gmag'][i] < 15:
                                 front_stars_set.add((t_o['Ra'][i], t_o['Dec'][i], t_o['Gmag'][i]))
 
         else:
@@ -310,7 +310,7 @@ class Image(object):
             x_t, y_t = w.world_to_pixel(SkyCoord(front_stars_list[j][0], front_stars_list[j][1], unit='deg'))
             center_distance = sqrt((x_t - self._coord_pix[0]) ** 2 +
                                    (y_t - self._coord_pix[1]) ** 2) * self._pxs
-            if center_distance <= xmatch_radius:
+            if center_distance <= safe_radius:
                 continue
             front_stars_world.add_row([front_stars_list[j][0], front_stars_list[j][1], front_stars_list[j][2], 0, 0, 0])
 
@@ -689,7 +689,7 @@ class Image(object):
         ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
         return ax
 
-    def remove_sources_simple(self, l_half=18, catalog=None):
+    def remove_sources_simple(self, l_half=18, catalog=None, min_ra=3, max_ra=50):
         '''
         Remove the contaminating sources in the image. Should run mask_stars() first.
         Parameter
@@ -750,7 +750,11 @@ class Image(object):
                 if (h[d] < mea_sample + 2 * std_sample) and flag:
                     clean_ra = int(r[d])
                     flag = False
-            big_ra = 2 * clean_ra
+            if clean_ra < min_ra:
+                clean_ra = int(2*self._psf_FWHM)
+            if clean_ra > max_ra:
+                continue
+            big_ra = 3 * clean_ra
             big_ap = []
             for a in range(-big_ra, big_ra + 1):
                 for b in range(-big_ra, big_ra + 1):
@@ -889,7 +893,6 @@ class Image(object):
             radius = int(cat_world[i]['radius'])
             mea = cat_world[i]['mean']
             std = cat_world[i]['std']
-            data_box = []
 
             for a in range(-2 * radius, 2 * radius + 1):
                 for b in range(-2 * radius, 2 * radius + 1):
@@ -982,24 +985,50 @@ class Atlas(object):
     science target in each image.
     '''
 
-    def __init__(self, image_list):
+    def __init__(self, image_list, header_list, name_list):
         '''
         Parameters
         ----------
         image_list : list
-            A list of Images
+            A list of images (2d array).
+        name_list: list
+            a list of names (strings).
         '''
         self._image_list = image_list
+        self._header_list = header_list
+        self._name_list = name_list
         self._dict = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
-            'GALEX': {'152.8nm': (0.1528, 3.2, 4.3), '227.1nm': (0.2271, 3.2, 5, 3)},
-            'SDSS': {'355.1nm': (0.3551, 0.45, 1.3), '468.6nm': (0.4686, 0.45, 1.3), '616.6nm': (0.6166, 0.45, 1.3),
-                     '748.0nm': (0.7480, 0.45, 1.3), '893.2nm': (0.8932, 0.45, 1.3)},
-            '2MASS': {'1.25um': (1.25, 1., 2.), '1.65um': (1.65, 1., 2.), '2.16um': (2.16, 1., 2.)},
-            'WISE': {'3.4um': (3.4, 1.375, 6.1), '4.6um': (4.6, 1.375, 6.4), '12um': (12., 1.375, 6.5),
-                     '22um': (22., 1.375, 12)}
+            'GALEX': {'FUV': (0.1528, 3.2, 4.3), 'NUV': (0.2271, 3.2, 5, 3)},
+            'SDSS': {'u': (0.3551, 0.45, 1.3), 'g': (0.4686, 0.45, 1.3), 'r': (0.6166, 0.45, 1.3),
+                     'i': (0.7480, 0.45, 1.3), 'z': (0.8932, 0.45, 1.3)},
+            '2MASS': {'J': (1.25, 1., 2.), 'H': (1.65, 1., 2.), 'Ks': (2.16, 1., 2.)},
+            'WISE': {'3.4': (3.4, 1.375, 6.1), '4.6': (4.6, 1.375, 6.4), '12': (12., 1.375, 6.5),
+                     '22': (22., 1.375, 12)}
         }
+        self._id = None
+        self._telescope_list = []
+        self._filter_list = []
+        self._wavelength_list = []
+        self._pxs_list = []
+        self._fwhm_list = []
+        for i in range(len(name_list)):
+            name = name_list[i].strip()
+            name_temp = name.split('_')
+            if not self._id:
+                self._id = name_temp[0][3:]
+            telescope_temp = name_temp[1]
+            filter_temp = name_temp[2]
+            self._telescope_list.append(telescope_temp)
+            self._filter_list.append(filter_temp)
+            self._wavelength_list.append(self._dict[telescope_temp][filter_temp][0])
+            self._pxs_list.append(self._dict[telescope_temp][filter_temp][1])
+            self._fwhm_list.append(self._dict[telescope_temp][filter_temp][2])
 
-    def match_images(self, id=None, match_header=None, make_fits=False):
+            self._header = None
+            self._fwhm = None
+            self._image_list_mathced = None
+
+    def match_images(self, match_header=None, make_fits=False):
         '''
         Get a new list of images with matched resolution, pixel scale, and size.
         Parameter
@@ -1012,19 +1041,11 @@ class Atlas(object):
         Containing a series of 2d array.
         '''
         # match resolution
-        img_list = self._image_list
-        dict = self._dict
-        new_img_list = [i._image_cleaned for i in img_list]
-        header_list = [i._header for i in self._image_list]
-        fwhm_list = []
-        pixel_size = []
-        wavelength = []
-        for i in range(len(img_list)):
-            telescope = header_list[i]['TELESCOP'].split()[0]
-            str_wavelength = header_list[i]['WVLNGTH'].split()[0]
-            fwhm_list.append(dict[telescope][str_wavelength][2])
-            pixel_size.append(dict[telescope][str_wavelength][1])
-            wavelength.append(dict[telescope][str_wavelength][0])
+        new_img_list = self._image_list
+        header_list = self._header_list
+        fwhm_list = self._fwhm_list
+        pixel_size = self._pxs_list
+        wavelength = self._wavelength_list
         sigma_list = [i / (2 * sqrt(2 * log(2))) for i in fwhm_list]
         sigma_kernel = [sqrt(max(sigma_list) ** 2 - sigma_list[i] ** 2) for i in range(len(sigma_list))]
         sigma_kernel_pixel = [sigma_kernel[i] / pixel_size[i] for i in range(len(sigma_kernel))]
@@ -1045,9 +1066,9 @@ class Atlas(object):
             conv_img_list.append(convolved_data)
         # reproject
         if not match_header:
-            for header in header_list:
-                if header['TELESCOP'].split()[0] == "2MASS" and header['WVLNGTH'].split()[0] == '2.16um':
-                    match_header = header
+            for i in range(len(pixel_size)):
+                if pixel_size[i] == 1.:
+                    match_header = header_list[i]
                     break
         else:
             match_header = match_header
@@ -1059,18 +1080,17 @@ class Atlas(object):
             rpj_img_list.append(array)
 
         self._image_list_mathced = rpj_img_list
-        self._header = match_header
-        self._wavelength = wavelength  # um
+        self._header = match_header  # um
         self._fwhm = max(fwhm_list)
 
         if make_fits:
             os.makedirs('matched_images')
-            for i in range(len(img_list)):
-                tele_name = img_list[i]._str_telescope
-                filt_name = img_list[i]._str_filter
+            for i in range(len(new_img_list)):
+                tele_name = self._telescope_list[i]
+                filt_name = self._filter_list[i]
                 hdu_pri = fits.PrimaryHDU(rpj_img_list[i], header=match_header)
                 hdul_new = fits.HDUList([hdu_pri])
-                hdul_new.writeto('matched_images/NGC{}_{}_{}_matched.fits'.format(str(id), tele_name, filt_name),
+                hdul_new.writeto('matched_images/NGC{}_{}_{}_matched.fits'.format(str(self._id), tele_name, filt_name),
                                  overwrite=True)
 
     def get_target_coord_pix(self):
