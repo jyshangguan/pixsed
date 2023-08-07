@@ -751,7 +751,7 @@ class Image(object):
                     clean_ra = int(r[d])
                     flag = False
             if clean_ra < min_ra:
-                clean_ra = int(2*self._psf_FWHM)
+                clean_ra = int(2 * self._psf_FWHM)
             if clean_ra > max_ra:
                 continue
             big_ra = 3 * clean_ra
@@ -921,44 +921,6 @@ class Image(object):
             ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
-    def get_error(self, r=(10, 20, 30, 40, 50), nexample=50):
-        '''
-        Get the relationship between log10(std) and log10(area).
-        Parameter
-        -----------
-        r: tuple. optional.
-            Contain the radius of circular samples.
-        nexample: int.
-            The number of sampling.
-
-        self._error_log_line
-        -------------
-        The function of log10(std) and log10(area). ('asec')
-        '''
-        img_error = self._data_subbkg.copy()
-        mask = self._mask_background
-        pxs = self._pxs
-        error_list = []
-        for rr in r:
-            error_list.append(circular_error_estimate(img_error, mask, rr, nexample))
-        line_init = models.Linear1D()
-        r_list = [(rr * pxs) for rr in r]  # world r.
-        area_list = [(np.pi * rr ** 2) for rr in r_list]
-        fit = fitting.LinearLSQFitter()
-        x_fit = [log10(i) for i in area_list]
-        y_fit = [log10(j) for j in error_list]
-        fitted_line = fit(line_init, x_fit, y_fit)
-        self._error_log_line = fitted_line
-
-    def plot_error(self):
-        error_line = self._error_log_line
-        error = lambda xr: (10 ** error_line(log10(np.pi * (xr ** 2))))
-        x = [i for i in range(1, 100)]
-        y = [error(i) for i in x]
-        plt.plot(x, y)
-        plt.xlabel('aperture radius / asec')
-        plt.ylabel('std / Jy')
-
     def save_image(self):
         header = self._header
         img = self._image_cleaned
@@ -971,7 +933,7 @@ class Image(object):
     def save_psf(self):
         oversampling = self._psf_oversample
         img = self._psf
-        os.makedirs('psf_images',exist_ok=True)
+        os.makedirs('psf_images', exist_ok=True)
         hdu_pri = fits.PrimaryHDU(img, header=None)
         hdul_new = fits.HDUList([hdu_pri])
         hdul_new.writeto(
@@ -985,7 +947,7 @@ class Atlas(object):
     science target in each image.
     '''
 
-    def __init__(self, image_list, header_list, name_list):
+    def __init__(self, target_coordinate, image_list, header_list, name_list):
         '''
         Parameters
         ----------
@@ -997,6 +959,8 @@ class Atlas(object):
         self._image_list = image_list
         self._header_list = header_list
         self._name_list = name_list
+        self._ra, self._dec = target_coordinate
+        self._coord = None
         self._dict = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
             'GALEX': {'FUV': (0.1528, 3.2, 4.3), 'NUV': (0.2271, 3.2, 5, 3)},
             'SDSS': {'u': (0.3551, 0.45, 1.3), 'g': (0.4686, 0.45, 1.3), 'r': (0.6166, 0.45, 1.3),
@@ -1027,8 +991,9 @@ class Atlas(object):
             self._header = None
             self._fwhm = None
             self._image_list_mathced = None
+            self._circular_measurement = None
 
-    def match_images(self, match_header=None, make_fits=False):
+    def match_images(self, match_header=None, make_fits=True):
         '''
         Get a new list of images with matched resolution, pixel scale, and size.
         Parameter
@@ -1066,8 +1031,8 @@ class Atlas(object):
             conv_img_list.append(convolved_data)
         # reproject
         if not match_header:
-            for i in range(len(pixel_size)):
-                if pixel_size[i] == 1.:
+            for i in range(len(header_list)):
+                if header_list[i]['TELESCOP'].split('/').strip() == '2MASS':
                     match_header = header_list[i]
                     break
         else:
@@ -1093,30 +1058,56 @@ class Atlas(object):
                 hdul_new.writeto('matched_images/NGC{}_{}_{}_matched.fits'.format(str(self._id), tele_name, filt_name),
                                  overwrite=True)
 
-    def get_target_coord_pix(self):
+    def get_error(self, r=(10, 20, 30, 40, 50, 60), nexample=50, mask_radius=None):
         '''
-        Get the pixel coord of the target galaxy using the current header.
-        '''
-        w = WCS(self._header)
-        xc, yc = w.world_to_pixel(self._image_list[0]._coord)
-        self._target_coord_pix = xc, yc
-        self._target_coord = self._image_list[0]._coord
-        return xc, yc
+        Get the relationship between log10(std) and log10(area).
+        Parameter
+        -----------
+        r: tuple. optional.
+            Contain the radius of circular samples. pixels.
+        nexample: int.
+            The number of sampling.
 
-    def get_a_v(self):
+        self._error_log_line
+        -------------
+        The function of log10(std) and log10(area). ('asec')
         '''
-        https://irsa.ipac.caltech.edu/applications/DUST/
-        '''
-        sky_coord = self._image_list[0]._coord
-        self._a_v = None
+        img_list_matched = self._image_list_mathced
+        header = self._header
+        self._coord = read_coordinate(self._ra, self._dec)
+        w = WCS(header)
+        xc, yc = w.world_to_pixel(self._coord)
 
-    def circular_measurement(self, radius=None, a_v=None, gala_extinction=True, error=True):
+        mask = np.zeros(np.shape(img_list_matched[0]))
+        ra = int(mask_radius)
+        for a in range(-ra, ra + 1):
+            for b in range(-ra, ra + 1):
+                if sqrt(a ** 2 + b ** 2) <= ra:
+                    mask[int(yc) + b, int(xc) + a] = True
+        pxs = (abs(self._header['CDELT1']) * 3600.)
+        fitted_line_list = []
+        for k in range(len(img_list_matched)):
+            error_list = []
+            for rr in r:
+                error_list.append(circular_error_estimate(img_list_matched[k], mask, rr, nexample, percent=99.))
+            line_init = models.Linear1D()
+            r_list = [(rr * pxs) for rr in r]  # world r.
+            area_list = [(np.pi * rr ** 2) for rr in r_list]
+            fit = fitting.LinearLSQFitter()
+            x_fit = [log10(i) for i in area_list]
+            y_fit = [log10(j) for j in error_list]
+            fitted_line = fit(line_init, x_fit, y_fit)
+            fitted_line_list.append(fitted_line)
+        self._error_log_line_list = fitted_line_list
+
+    def circular_measurement(self, radius, a_v):
         '''
         Do the circular measurement.
         radius: float
             The max radius for measurement, which must containing all the flux. 'asec'
         a_v: float.
             The a_v for galactic extinction.
+            https://irsa.ipac.caltech.edu/applications/DUST/
         gala_extinction: bool
             If True, it will do the galactic extinction correction.
 
@@ -1125,57 +1116,41 @@ class Atlas(object):
         A dictionary. Containing functions (input is radius in 'asec').
         Containing the multi-band flux, and error. ('Jy')
         '''
-        wavelength = self._wavelength
-        xc, yc = self.get_target_coord_pix()
+        wavelength = self._wavelength_list
+        header = self._header
+        self._coord = read_coordinate(self._ra, self._dec)
+        w = WCS(header)
+        xc, yc = w.world_to_pixel(self._coord)
         pxs = (abs(self._header['CDELT1']) * 3600.)
-        if radius:
-            ra = radius / pxs
-        else:
-            img_matched_list = self._image_list_mathced
-            ra_box = []
-            for i in range(len(img_matched_list)):
-                mea, med, std = sigma_clipped_stats(img_matched_list[i], maxiters=5)
-                max_radius = (min(np.shape(img_matched_list[i])[0], np.shape(img_matched_list[i])[1]) // 2) - 5
-                edge_radii = [radii for radii in range(int(max_radius) + 1)]
-                rp = RadialProfile(img_matched_list[i], (xc, yc), edge_radii)
-                h = rp.profile
-                ra_t = max_radius
-                for j in range(len(h)):
-                    if h[j] <= mea + 3 * std:
-                        ra_t = j
-                        break
-                ra_box.append(ra_t)
-            ra = max(ra_box)
 
-        if not a_v:
-            a_v = self._a_v
-        dict = {}
-        if gala_extinction:
-            a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
-            a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
+        ra = radius / pxs
+
+        photometry_dict = {}
+
+        a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
+        a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
         for i in range(len(wavelength)):
-            min_radius = 0.0
-            max_radius = ra
-            radius_step = 1.0
-            cog = CurveOfGrowth(self._image_list_mathced[i], (xc, yc), min_radius, max_radius, radius_step)
+            max_radius = int(ra)
+            radii = [j for j in range(1, max_radius + 1)]
+            cog = CurveOfGrowth(self._image_list_mathced[i], (xc, yc), radii=radii)
             h = cog.profile
             r = cog.radius
             r_c = [rr * pxs for rr in r]
-            if gala_extinction:
-                h_c = [hh * a_list_flux[i] for hh in h]
-                flux = interpolate.interp1d(r_c, h_c)
-            else:
-                flux = interpolate.interp1d(r_c, h)
-            dict[wavelength[i]] = {}
-            dict[wavelength[i]]['flux'] = flux
-            if error:
-                error_line = self._image_list[i]._error_log_line
-                error = lambda xr: a_list_flux[i] * (10 ** error_line(log10(np.pi * (xr ** 2))))
-                dict[wavelength[i]]['error'] = error
-        self._circular_measurement = dict
-        self._rmax = ra * pxs
 
-    def make_catalog(self, measurement_ra=None, redshift=0, id=0, plot=False):
+            h_c = [hh * a_list_flux[i] for hh in h]
+            flux = interpolate.interp1d(r_c, h_c)
+
+            photometry_dict[wavelength[i]] = {}
+            photometry_dict[wavelength[i]]['flux'] = flux
+
+            def mkfun(i):
+                def error_temp(xr):
+                    return a_list_flux[i] * (10 ** self._error_log_line_list[i](log10(np.pi * (xr ** 2))))
+                return error_temp
+            photometry_dict[wavelength[i]]['error'] = mkfun(i)
+        self._circular_measurement = photometry_dict
+
+    def make_catalog(self, measurement_ra, redshift=0, id=0, plot=False):
         ref = {
             0.1528: 'FUV', 0.2271: 'NUV', 0.3551: 'u_sdss', 0.4686: 'g_sdss', 0.6166: 'r_sdss', 0.7480: 'i_sdss',
             0.8932: 'z_sdss', 1.25: 'J_2mass', 1.65: 'H_2mass', 2.16: 'Ks_2mass', 3.4: 'WISE1', 4.6: 'WISE2',
@@ -1184,22 +1159,8 @@ class Atlas(object):
         data = self._circular_measurement
         k = data.keys()
         k_list = sorted(k)
-        os.makedirs('catalog')
-        if not measurement_ra:
-            rmax = float(self._rmax)
-            rmin = float(self._fwhm / 2)
-            measurement_ra_t = []
-            measurement_ra = []
-            count = 0
-            while True:
-                r_temp = rmin * (2 ** count)
-                if r_temp >= rmax:
-                    measurement_ra_t.append(rmax)
-                    break
-                measurement_ra_t.append(r_temp)
-                count += 1
-            for i in measurement_ra_t:
-                measurement_ra.append(round(i, 1))
+        os.makedirs('catalog', exist_ok=True)
+
         for r in measurement_ra:
             f = open('catalog/{}_{}.txt'.format(id, r), 'x')
             f.write('#id redshift ')
@@ -1213,8 +1174,8 @@ class Atlas(object):
             f.close()
         if plot:
             for r in measurement_ra:
-                x = plt.plot([log10(i) for i in k_list], [log10(data[i]['flux'](r) / 1000) for i in k_list],
-                             marker='x', markersize=3, label='{} arcsec radius'.format(r), linewidth=1)
+                plt.plot([log10(i) for i in k_list], [log10(data[i]['flux'](r) / 1000) for i in k_list],
+                         marker='x', markersize=3, label='{} arcsec radius'.format(r), linewidth=1)
                 plt.xlabel('lg(wavelength) / μm')
                 plt.ylabel('lg(flux) / mJy')
                 plt.legend()
