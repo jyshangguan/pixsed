@@ -161,3 +161,4 @@ cython_debug/
 
 # Develop directory
 dev/
+.DS_Store
