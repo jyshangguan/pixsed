@@ -319,7 +319,7 @@ class Image(object):
 
     
     def get_sources_overlap2(self, detect_thres=15., xmatch_radius=3., threshold_gmag=25., 
-                             threshold_pss=0.95, threshold_plx=3, center_radius=5.):
+                             threshold_pss=0.95, threshold_plx=2, center_radius=5.):
         '''
         Get the foreground stars that overlap with the target galaxy.
         Parameter
