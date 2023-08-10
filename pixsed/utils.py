@@ -1,11 +1,12 @@
+import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats
 from astropy.visualization import AsinhStretch, SqrtStretch, LogStretch
 from astropy.visualization import PercentileInterval
 from astropy.visualization.mpl_normalize import ImageNormalize
+from astroquery.xmatch import XMatch
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -109,4 +110,26 @@ def circular_error_estimate(img, mask, radius, nexample, percent=85.):
     return std
 
 
-
+def xmatch_gaiadr3(cat, radius, colRA1='ra', colDec1='dec'):
+    '''
+    Cross match the catalog with Gaia DR3.
+    
+    Parameters
+    ----------
+    cat : Astropy Table
+        A table with the source ra and dec to cross-match with Gaia DR3.
+    radius : float
+        Cross-match radius, units: arcsec.
+    colRA1 : string (default: 'ra')
+        The Column of the ra.
+    colDec1 : string (default: 'dec')
+        The Column of the dec.
+    
+    Returns
+    -------
+    t_o : Astropy Table
+        The output table.
+    '''
+    t_o = XMatch.query(cat1=cat, cat2='vizier:I/355/gaiadr3', max_distance=radius*u.arcsec, 
+                       colRA1=colRA1, colDec1=colDec1)  # Gaia xmatch.
+    return t_o

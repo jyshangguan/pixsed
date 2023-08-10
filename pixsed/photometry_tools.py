@@ -26,7 +26,8 @@ from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deble
 from reproject import reproject_adaptive
 from scipy import interpolate
 
-from utils import read_coordinate, plot_image, circular_error_estimate
+from .utils import read_coordinate, plot_image, circular_error_estimate
+from .utils import xmatch_gaiadr3
 
 mpl.rc("xtick", direction="in", labelsize=16)
 mpl.rc("ytick", direction="in", labelsize=16)
@@ -316,6 +317,67 @@ class Image(object):
 
         self._sources_overlap = front_stars_world
 
+    
+    def get_sources_overlap2(self, detect_thres=15., xmatch_radius=3., threshold_gmag=25., 
+                             threshold_pss=0.95, threshold_plx=3, center_radius=5.):
+        '''
+        Get the foreground stars that overlap with the target galaxy.
+        Parameter
+        -----------
+        detect_thres: float
+            The threshold for DAOFinder.
+        xmatch_radius: float
+            The xmatch radius. arcsec.
+        threshold_gmag: float
+            The max G band magnitude of the stars which will be picked out.
+        threshold_pss (optional): float
+            The threshold to select stars according to Gaia probability of single star.
+        threshold_plx (optional): float
+            The threshold to select stars according to Gaia parallax SNR.
+        
+        Return
+        ---------
+        A table contains Ra, Dec, and Gmag.
+        '''
+        assert hasattr(self, '_mask_background'), 'Please run mask_background() first!'
+        assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
+
+        # initial detection
+        mask_galaxy = self._mask_galaxy
+        daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_FWHM)
+        sources = daofind(self._data_subbkg, mask=~mask_galaxy)
+
+        # Gaia Xmatch
+        w = self._wcs
+        if sources:
+            c = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
+            sources_world = Table([c.ra.deg, c.dec.deg], names=['ra', 'dec'])
+            t_o = xmatch_gaiadr3(sources_world, xmatch_radius, colRA1='ra', colDec1='dec')  # Gaia xmatch.
+
+            fltr = (t_o['Gmag'] < threshold_gmag)
+
+            if threshold_pss is not None:
+                fltr &= (t_o['PSS'] > threshold_pss) & ~t_o['PSS'].mask
+            
+            if threshold_plx is not None:
+                plx_snr = (t_o['Plx'] / t_o['e_Plx']) 
+                fltr &= (plx_snr > threshold_plx) & ~t_o['Plx'].mask
+
+            t_s = t_o[fltr]
+
+            null_array = np.zeros(len(t_s))
+            front_stars_set = Table([t_s['ra'], t_s['dec'], t_s['Gmag'], null_array, null_array, null_array], 
+                                    names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])
+
+            x_t, y_t = w.world_to_pixel(SkyCoord(t_s['ra'], t_s['dec'], unit='deg'))
+            center_distance = np.sqrt((x_t - self._coord_pix[0]) ** 2 + 
+                                      (y_t - self._coord_pix[1]) ** 2) * self._pxs
+            fltr = center_distance > center_radius
+            self._sources_overlap = front_stars_set[fltr]
+        else:
+            self._sources_overlap = Table(names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])  # Build up the final foreground stars table.
+
+
     def plot_sources_overlap(self, percentile=98., xlim=None, ylim=None, zoomin=None):
         w = self._wcs
         front_stars_world = self._sources_overlap
@@ -332,7 +394,7 @@ class Image(object):
         norm = simple_norm(self._data_subbkg, percent=percentile, stretch='asinh')
         ax[0].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
         ax[1].imshow(self._data_subbkg, cmap='gray', norm=norm, origin='lower')
-        apertures.plot(color='blue', lw=5, alpha=0.5)
+        apertures.plot(color='red', lw=5, alpha=0.5)
         if xlim and ylim:
             ax[0].set_xlim(xlim[0], xlim[1])
             ax[0].set_ylim(ylim[0], ylim[1])
@@ -921,24 +983,49 @@ class Image(object):
             ax[1].set_xlim(int(xl / 2 - rate * (xl / 2)), int(xl / 2 + rate * (xl / 2)))
             ax[1].set_ylim(int(yl / 2 - rate * (yl / 2)), int(yl / 2 + rate * (yl / 2)))
 
-    def save_image(self):
+    def save_image(self, filename=None, overwrite=False):
+        '''
+        Save the image.
+
+        Parameters
+        ----------
+        filename (optional) : string
+            The filename of the PSF model.
+        overwrite : bool (default: False)
+            Overwrite the existing file.
+        '''
         header = self._header
         img = self._image_cleaned
-        os.makedirs('cleaned_images', exist_ok=True)
         hdu_pri = fits.PrimaryHDU(img, header=header)
         hdul_new = fits.HDUList([hdu_pri])
-        hdul_new.writeto('cleaned_images/NGC{}_{}_{}_cleaned.fits'.format(str(self._id), self._telescope, self._filter),
-                         overwrite=True)
 
-    def save_psf(self):
+        os.makedirs('cleaned_images', exist_ok=True)
+        if filename is None:
+            filename = 'cleaned_images/NGC{}_{}_{}_cleaned.fits'.format(str(self._id), self._telescope, self._filter)
+
+        hdul_new.writeto(filename, overwrite=overwrite)
+
+    def save_psf(self, filename=None, overwrite=False):
+        '''
+        Save the PSF model of this image.
+
+        Parameters
+        ----------
+        filename (optional) : string
+            The filename of the PSF model.
+        overwrite : bool (default: False)
+            Overwrite the existing file.
+        '''
         oversampling = self._psf_oversample
         img = self._psf
-        os.makedirs('psf_images', exist_ok=True)
         hdu_pri = fits.PrimaryHDU(img, header=None)
         hdul_new = fits.HDUList([hdu_pri])
-        hdul_new.writeto(
-            'psf_images/NGC{}_{}_{}_psf_{}.fits'.format(str(self._id), self._telescope, self._filter, oversampling),
-            overwrite=True)
+
+        os.makedirs('psf_images', exist_ok=True)
+        if filename is None:
+            filename = 'psf_images/NGC{}_{}_{}_psf_{}.fits'.format(str(self._id), self._telescope, self._filter, oversampling)
+
+        hdul_new.writeto(filename, overwrite=overwrite)
 
 
 class Atlas(object):
