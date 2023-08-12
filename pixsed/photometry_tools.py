@@ -28,6 +28,7 @@ from scipy import interpolate
 
 from .utils import read_coordinate, plot_image, circular_error_estimate
 from .utils import xmatch_gaiadr3
+from .utils import scale_mask, get_mask_polygons
 
 mpl.rc("xtick", direction="in", labelsize=16)
 mpl.rc("ytick", direction="in", labelsize=16)
@@ -544,12 +545,173 @@ class Image(object):
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
 
+    def get_image_segmentation(self, data, threshold, npixels, mask=None, connectivity=8, 
+                               kernel_fwhm=2, plot=False, axs=None, norm_kwargs=None):
+        '''
+        Get the image segmentation.
+
+        Parameters
+        ----------
+        data : 2d array
+            The image data to be decomposed.
+        threshold : float
+            The threshold ot detect source with image segmentation.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} optional
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 2)
+            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        axs : matplotlib axes
+            The axes to plot the data and segmentation map. Must be >=2 panels.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+
+        Returns
+        -------
+        segment_map : Photutils Segmentation
+            The segmentation.
+        convolved_data : 2D array
+            The kernel convolved image.
+        
+        Notes
+        -----
+        [SGJY added]
+        '''
+        if kernel_fwhm == 0:
+            convolved_data = data
+        elif kernel_fwhm > 0:
+            kernel = make_2dgaussian_kernel(fwhm=kernel_fwhm, size=(2*kernel_fwhm+1))
+            convolved_data = convolve(data, kernel)
+        else:
+            raise ValueError(f'The kernel_fwhm ({kernel_fwhm}) has to be >=0!')
+
+        segment_map = detect_sources(convolved_data, threshold=threshold, npixels=npixels, 
+                                     connectivity=connectivity, mask=mask)
+
+        if plot:
+            if not axs:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+                plain = False
+            else:
+                plain = True
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99, stretch='asinh')
+
+            norm = simple_norm(data, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(data, origin='lower', cmap='Greys_r', norm=norm)
+            ax = axs[1]
+            ax.imshow(segment_map, origin='lower', cmap=segment_map.cmap)
+
+            if not plain:
+                axs[0].set_title('Data')
+                axs[1].set_title('Segmentation Image')
+        return segment_map, convolved_data
+
+    def get_target_mask(self, nstd=0.5, npixels=12, mask=None, connectivity=8, 
+                        kernel_fwhm=3, expand_factor=1, plot=False, norm_kwargs=None):
+        '''
+        Get the mask of the target galaxy.
+        Assuming that there is only one target object on the background.
+        If the coord of the object is None, then the target which has the largest
+        area will be taken into consideration.
+
+        Parameter
+        ----------
+        threshold : float
+            The threshold ot detect source with image segmentation.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 2)
+            The kernel FWHM to smooth the image.
+        expand_factor : float (default: 1)
+            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        
+        Notes
+        -----
+        [SGJY added]
+        '''
+        mea, med, std = self.background_properties()
+        img_sub = self._data - med
+        smap, conv_data = self.get_image_segmentation(img_sub, nstd*std, 
+                                                      kernel_fwhm=kernel_fwhm, 
+                                                      npixels=npixels, 
+                                                      mask=mask, 
+                                                      connectivity=connectivity, 
+                                                      plot=False)
+        
+        cat = SourceCatalog(img_sub, smap, convolved_data=conv_data)
+        sources_tb = cat.to_table()
+
+        if self._coord:
+            label = smap.data[int(self._coord_pix[1]), int(self._coord_pix[0])]
+        else:
+            label = smap.labels[np.argmax(smap.areas)]
+        mask_galaxy = smap == label
+
+        if expand_factor != 1:
+            mask_galaxy = scale_mask(mask_galaxy, factor=expand_factor, connectivity=connectivity)
+        self._mask_galaxy = mask_galaxy
+        self._segment_map = smap
+        self._convolved_data = conv_data
+
+        if plot:
+            from shapely.geometry import shape
+
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.05)
+            
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99, stretch='asinh')
+            norm = simple_norm(img_sub, **norm_kwargs)
+            pList = get_mask_polygons(self._mask_galaxy)
+            poly = shape(pList[0])
+            x_poly, y_poly = poly.exterior.xy
+
+            ax = axs[0]
+            ax.imshow(img_sub, origin='lower', cmap='Greys_r', norm=norm)
+            ax.plot(x_poly, y_poly, lw=2, color='cyan', label=f'Target mask\nExpand factor: {expand_factor}')
+            ax.set_title('Background subtracted image', fontsize=18)
+            ax.legend(loc='upper left', fontsize=16, labelcolor='cyan', frameon=False)
+
+            ax = axs[1]
+            ax.imshow(smap, origin='lower', cmap=smap.cmap)
+            ax.plot(x_poly, y_poly, lw=2, color='cyan')
+            ax.set_title('Segmentation map', fontsize=18)
+
+            return axs
+
     def mask_galaxy(self, thres=1., iter=10, kernel_size=None):
         '''
         Get the mask of the target galaxy.
         Assuming that there is only one target object on the background.
         If the coord of the object is None, then the target which has the largest
         area will be taken into consideration.
+
         Parameter
         ----------
         thres: float.
@@ -600,6 +762,19 @@ class Image(object):
         norm = simple_norm(self._data, stretch='asinh', percent=percentile)
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_galaxy, cmap='gray', origin='lower')
+
+    def plot_segmentation(self, ax=None):
+        '''
+        Plot the segmentation map.
+        
+        Notes
+        -----
+        [SGJY added]
+        '''
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(7, 7))
+        ax.imshow(self._segment_map, origin='lower', cmap=self._segment_map.cmap)
+        return ax
 
     def mask_stars(self, thres=4., thres_area=100, iter_point=3, iter_extend=5,
                    kernel_size_point=None, kernel_size_extend=None):
@@ -741,15 +916,15 @@ class Image(object):
             ax.plot(self._coord_pix[0], self._coord_pix[1], marker='+', color='r', ms=10)
         return ax
 
-    def plot_segmentation(self, ax=None):
-        '''
-        Plot the segmentation.
-        '''
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(7, 7))
+    #def plot_segmentation(self, ax=None):
+    #    '''
+    #    Plot the segmentation.
+    #    '''
+    #    if ax is None:
+    #        fig, ax = plt.subplots(figsize=(7, 7))
 
-        ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
-        return ax
+    #    ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
+    #    return ax
 
     def remove_sources_simple(self, l_half=18, catalog=None, min_ra=3, max_ra=50):
         '''
