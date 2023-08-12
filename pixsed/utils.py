@@ -7,6 +7,9 @@ from astropy.visualization import AsinhStretch, SqrtStretch, LogStretch
 from astropy.visualization import PercentileInterval
 from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.xmatch import XMatch
+from rasterio.features import rasterize, shapes
+from shapely.geometry import shape
+from shapely.affinity import scale
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -133,3 +136,63 @@ def xmatch_gaiadr3(cat, radius, colRA1='ra', colDec1='dec'):
     t_o = XMatch.query(cat1=cat, cat2='vizier:I/355/gaiadr3', max_distance=radius*u.arcsec, 
                        colRA1=colRA1, colDec1=colDec1)  # Gaia xmatch.
     return t_o
+
+
+def get_mask_polygons(mask, connectivity=8):
+    '''
+    Get polygons from the mask.
+    
+    Parameters
+    ----------
+    mask : 2D array
+        The mask with masked in region True or 1.
+    connectivity : {4, 8} (default: 8)
+        The type of pixel connectivity used in determining how pixels are 
+        grouped into a detected source. The options are 4 or 8 (default). 
+        4-connected pixels touch along their edges. 8-connected pixels touch 
+        along their edges or corners.
+        
+    Returns
+    -------
+    pList : list
+        List of dict with polygon information.
+    '''
+    polygons = np.array(list(shapes(mask.astype('int32'), connectivity=connectivity)))
+    vals = polygons[:, 1]
+    
+    # Collect the polygons that are associated with the mask.
+    pList = polygons[vals == 1, 0]
+    return pList
+
+
+def scale_mask(mask, factor, connectivity=8):
+    '''
+    Scale the mask.
+
+    Parameters
+    ----------
+    mask : 2D array
+        The mask with masked in region True or 1.
+    factor : float
+        The scaling factor of the mask
+    connectivity : {4, 8} (default: 8)
+        The type of pixel connectivity used in determining how pixels are 
+        grouped into a detected source. The options are 4 or 8 (default). 
+        4-connected pixels touch along their edges. 8-connected pixels touch 
+        along their edges or corners.
+        
+    Returns
+    -------
+    mask_s : 2D array
+        The scaled mask with masked region True.
+    '''
+    pList = get_mask_polygons(mask, connectivity=connectivity)
+    
+    sList = []
+    for p in pList:
+        sList.append( scale(shape(p), xfact=factor, yfact=factor) )
+    
+    # Scale the polygon
+    mask_s = rasterize(sList, out_shape=mask.shape).astype('bool')
+    return mask_s
+
