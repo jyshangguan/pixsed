@@ -22,13 +22,16 @@ from photutils.aperture import CircularAperture
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile, CurveOfGrowth
-from photutils.segmentation import detect_sources, make_2dgaussian_kernel, deblend_sources, SourceCatalog, SourceFinder
+from photutils.segmentation import (detect_sources, make_2dgaussian_kernel, 
+                                    deblend_sources, SourceCatalog, SourceFinder)
 from reproject import reproject_adaptive
 from scipy import interpolate
 
+from shapely.geometry import shape
 from .utils import read_coordinate, plot_image, circular_error_estimate
-from .utils import xmatch_gaiadr3
-from .utils import scale_mask, get_mask_polygons
+from .utils import xmatch_gaiadr3, get_image_segmentation
+from .utils import scale_mask, get_mask_polygons, add_mask_circle, poly_to_xy
+from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
 mpl.rc("xtick", direction="in", labelsize=16)
 mpl.rc("ytick", direction="in", labelsize=16)
@@ -79,6 +82,8 @@ class Image(object):
         self._mask_point = None
         self._mask_stars = None
         self._mask_galaxy = None
+        self._mask_manual = None       # [SGJY added]
+        self._mask_contaminant = None  # [SGJY added]
         self._background_model = None
         self._image_cleaned_background = None
         self._sources_overlap = None
@@ -126,7 +131,8 @@ class Image(object):
         mask_background = self._mask_background
         sigma_clip = SigmaClip(sigma=3.)
         bkg_estimator = MedianBackground()
-        bkg = Background2D(img, (box_size, box_size), mask=mask_background, filter_size=(filter_size, filter_size),
+        bkg = Background2D(img, (box_size, box_size), mask=mask_background, 
+                           filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
         self._background_model = bkg.background
 
@@ -248,8 +254,10 @@ class Image(object):
         self._segmentation_catalog = SourceCatalog(self._data, self._segmentation,
                                                    convolved_data=convolved_data)
 
-    def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., xmatch_table='vizier:I/355/gaiadr3',
-                            xmatch_gmag=20., xmatch_distance=23., xmatch_plxerror=0.3, careful=False, safe_radius=5.):
+    def get_sources_overlap(self, detect_thres=15., xmatch_radius=3., 
+                            xmatch_table='vizier:I/355/gaiadr3',
+                            xmatch_gmag=20., xmatch_distance=23., 
+                            xmatch_plxerror=0.3, careful=False, safe_radius=5.):
         '''
         Get the foreground stars that overlap with the target galaxy.
         Parameter
@@ -365,18 +373,18 @@ class Image(object):
                 fltr &= (plx_snr > threshold_plx) & ~t_o['Plx'].mask
 
             t_s = t_o[fltr]
-
-            null_array = np.zeros(len(t_s))
-            front_stars_set = Table([t_s['ra'], t_s['dec'], t_s['Gmag'], null_array, null_array, null_array], 
-                                    names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])
-
             x_t, y_t = w.world_to_pixel(SkyCoord(t_s['ra'], t_s['dec'], unit='deg'))
+            null_array = np.zeros(len(t_s))
+            front_stars_set = Table([t_s['ra'], t_s['dec'], x_t, y_t, t_s['Gmag'], 
+                                     null_array, null_array, null_array], 
+                                    names=['Ra', 'Dec', 'x', 'y', 'Gmag', 'mean', 'std', 'radius'])
+
             center_distance = np.sqrt((x_t - self._coord_pix[0]) ** 2 + 
                                       (y_t - self._coord_pix[1]) ** 2) * self._pxs
             fltr = center_distance > center_radius
             self._sources_overlap = front_stars_set[fltr]
         else:
-            self._sources_overlap = Table(names=['Ra', 'Dec', 'Gmag', 'mean', 'std', 'radius'])  # Build up the final foreground stars table.
+            self._sources_overlap = Table(names=['Ra', 'Dec', 'x', 'y', 'Gmag', 'mean', 'std', 'radius'])  # Build up the final foreground stars table.
 
 
     def plot_sources_overlap(self, percentile=98., xlim=None, ylim=None, zoomin=None):
@@ -545,82 +553,6 @@ class Image(object):
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
 
-    def get_image_segmentation(self, data, threshold, npixels, mask=None, connectivity=8, 
-                               kernel_fwhm=2, plot=False, axs=None, norm_kwargs=None):
-        '''
-        Get the image segmentation.
-
-        Parameters
-        ----------
-        data : 2d array
-            The image data to be decomposed.
-        threshold : float
-            The threshold ot detect source with image segmentation.
-        npixels : int
-            The minimum number of connected pixels, each greater than threshold, 
-            that an object must have to be detected. npixels must be a positive 
-            integer.
-        mask : 2D bool array
-            A boolean mask, with the same shape as the input data, where True 
-            values indicate masked pixels. Masked pixels will not be included in 
-            any source.
-        connectivity : {4, 8} optional
-            The type of pixel connectivity used in determining how pixels are 
-            grouped into a detected source. The options are 4 or 8 (default). 
-            4-connected pixels touch along their edges. 8-connected pixels touch 
-            along their edges or corners.
-        kernel_fwhm : float (default: 2)
-            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
-        plot : bool (default: False)
-            Plot the data and segmentation map if True.
-        axs : matplotlib axes
-            The axes to plot the data and segmentation map. Must be >=2 panels.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-
-        Returns
-        -------
-        segment_map : Photutils Segmentation
-            The segmentation.
-        convolved_data : 2D array
-            The kernel convolved image.
-        
-        Notes
-        -----
-        [SGJY added]
-        '''
-        if kernel_fwhm == 0:
-            convolved_data = data
-        elif kernel_fwhm > 0:
-            kernel = make_2dgaussian_kernel(fwhm=kernel_fwhm, size=(2*kernel_fwhm+1))
-            convolved_data = convolve(data, kernel)
-        else:
-            raise ValueError(f'The kernel_fwhm ({kernel_fwhm}) has to be >=0!')
-
-        segment_map = detect_sources(convolved_data, threshold=threshold, npixels=npixels, 
-                                     connectivity=connectivity, mask=mask)
-
-        if plot:
-            if not axs:
-                fig, axs = plt.subplots(1, 2, figsize=(14, 7))
-                plain = False
-            else:
-                plain = True
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99, stretch='asinh')
-
-            norm = simple_norm(data, **norm_kwargs)
-
-            ax = axs[0]
-            ax.imshow(data, origin='lower', cmap='Greys_r', norm=norm)
-            ax = axs[1]
-            ax.imshow(segment_map, origin='lower', cmap=segment_map.cmap)
-
-            if not plain:
-                axs[0].set_title('Data')
-                axs[1].set_title('Segmentation Image')
-        return segment_map, convolved_data
-
     def get_target_mask(self, nstd=0.5, npixels=12, mask=None, connectivity=8, 
                         kernel_fwhm=3, expand_factor=1, plot=False, norm_kwargs=None):
         '''
@@ -650,6 +582,10 @@ class Image(object):
             The kernel FWHM to smooth the image.
         expand_factor : float (default: 1)
             The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
         
         Notes
         -----
@@ -657,12 +593,12 @@ class Image(object):
         '''
         mea, med, std = self.background_properties()
         img_sub = self._data - med
-        smap, conv_data = self.get_image_segmentation(img_sub, nstd*std, 
-                                                      kernel_fwhm=kernel_fwhm, 
-                                                      npixels=npixels, 
-                                                      mask=mask, 
-                                                      connectivity=connectivity, 
-                                                      plot=False)
+        smap, conv_data = get_image_segmentation(img_sub, nstd*std, 
+                                                 kernel_fwhm=kernel_fwhm, 
+                                                 npixels=npixels, 
+                                                 mask=mask, 
+                                                 connectivity=connectivity, 
+                                                 plot=False)
         
         cat = SourceCatalog(img_sub, smap, convolved_data=conv_data)
         sources_tb = cat.to_table()
@@ -680,27 +616,24 @@ class Image(object):
         self._convolved_data = conv_data
 
         if plot:
-            from shapely.geometry import shape
-
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
             fig.subplots_adjust(wspace=0.05)
             
             if norm_kwargs is None:
-                norm_kwargs = dict(percent=99, stretch='asinh')
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(img_sub, **norm_kwargs)
             pList = get_mask_polygons(self._mask_galaxy)
-            poly = shape(pList[0])
-            x_poly, y_poly = poly.exterior.xy
+            xy_poly = poly_to_xy(pList[0])
 
             ax = axs[0]
             ax.imshow(img_sub, origin='lower', cmap='Greys_r', norm=norm)
-            ax.plot(x_poly, y_poly, lw=2, color='cyan', label=f'Target mask\nExpand factor: {expand_factor}')
+            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan', label=f'Target mask\nExpand factor: {expand_factor}')
             ax.set_title('Background subtracted image', fontsize=18)
             ax.legend(loc='upper left', fontsize=16, labelcolor='cyan', frameon=False)
 
             ax = axs[1]
             ax.imshow(smap, origin='lower', cmap=smap.cmap)
-            ax.plot(x_poly, y_poly, lw=2, color='cyan')
+            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan')
             ax.set_title('Segmentation map', fontsize=18)
 
             return axs
@@ -773,7 +706,7 @@ class Image(object):
         '''
         if ax is None:
             fig, ax = plt.subplots(figsize=(7, 7))
-        ax.imshow(self._segment_map, origin='lower', cmap=self._segment_map.cmap)
+        ax.imshow(self._segment_map, origin='lower', cmap=self._segment_map.cmap, interpolation='nearest')
         return ax
 
     def mask_stars(self, thres=4., thres_area=100, iter_point=3, iter_extend=5,
@@ -1201,6 +1134,125 @@ class Image(object):
             filename = 'psf_images/NGC{}_{}_{}_psf_{}.fits'.format(str(self._id), self._telescope, self._filter, oversampling)
 
         hdul_new.writeto(filename, overwrite=overwrite)
+
+
+    def gen_contaminant_mask(self, radius_point=10, plot=False, norm_kwargs=None):
+        '''
+        Generate the mask of all contaminants.
+
+        Parameters
+        ----------
+        radius_point : float (default: 20)
+            The radius of the point source mask for Gaia stars.
+            The value should be guided by the PSF model.
+        plot : bool (default: False)
+            Plot the results if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        assert hasattr(self, '_mask_stars'), 'Please run mask_stars() first!'
+
+        mask = self._mask_stars.copy()
+        for (x, y) in zip(self._sources_overlap['x'], self._sources_overlap['y']):
+            add_mask_circle(mask, x=x, y=y, radius=radius_point)
+        
+        if self._mask_manual is not None:
+            mask |= self._mask_manual
+
+        self._mask_contaminant = mask
+
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.05)
+            
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+
+            ax.set_title('Background subtracted image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(mask, origin='lower', cmap='Greys_r')
+            ax.set_title('Mask', fontsize=18)
+    
+
+    def gen_mask_manual(self, mode='draw', verbose=True):
+        '''
+        Generate a manual mask.  A pop-up figure will be generated for 
+        interactive operations.
+        
+        Check the operation manual of the two modes in MaskBuilder_draw and 
+        MaskBuilder_segm in the utils_interactive module.
+
+        Parameters
+        ----------
+        mode : {'draw', 'segm'} optional
+            Choose the working mode.
+            draw : create the mask by drawing polygons.
+            segm : create the mask by selecting segmentations.
+        verbose : bool (default: False)
+            Output details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        # Change the matplotlib backend
+        ipy = get_ipython()
+        ipy.run_line_magic('matplotlib', 'tk')
+
+        # Prepare the event functions
+        def on_click(event):
+            mb.on_click(event)
+        
+        def on_press(event):
+            mb.on_press(event)
+        
+        def on_close(event):
+            mb.on_close(event)
+    
+        # Start to work
+        mask = self._mask_contaminant
+
+        if self._mask_manual is None:
+            self._mask_manual = np.zeros_like(mask, dtype=bool)
+    
+        fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
+        fig.subplots_adjust(wspace=0.05, hspace=0.1)
+    
+        if mode == 'draw':
+            mb = MaskBuilder_draw(self._data_subbkg, mask, mask_manual=self._mask_manual, 
+                                  ipy=ipy, fig=fig, axs=axs, verbose=verbose)
+            fig.canvas.mpl_connect('button_press_event', on_click)
+            fig.canvas.mpl_connect('key_press_event', on_press)
+            fig.canvas.mpl_connect('close_event', on_close)
+            plt.show()
+
+        elif mode == 'segm':
+            mb = MaskBuilder_segment(self._data_subbkg, mask, self._segment_map, 
+                                     mask_manual=self._mask_manual, ipy=ipy, fig=fig, 
+                                     axs=axs, verbose=verbose)
+            fig.canvas.mpl_connect('button_press_event', on_click)
+            fig.canvas.mpl_connect('close_event', on_close)
+            plt.show()
+
+
+    def reset_mask_manual(self):
+        '''
+        Set the mask_manual to None.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        self._mask_manual = None
 
 
 class Atlas(object):
