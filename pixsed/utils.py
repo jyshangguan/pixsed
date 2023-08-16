@@ -15,6 +15,8 @@ from photutils.segmentation import SourceFinder
 from rasterio.features import rasterize, shapes
 from shapely.geometry import shape
 from shapely.affinity import scale
+from scipy.ndimage import gaussian_filter
+#from reproject import 
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -354,8 +356,7 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
     if kernel_fwhm == 0:
         convolved_data = data
     elif kernel_fwhm > 0:
-        kernel = make_2dgaussian_kernel(fwhm=kernel_fwhm, size=(2*kernel_fwhm+1))
-        convolved_data = convolve(data, kernel)
+        convolved_data = gaussian_filter(data, kernel_fwhm/2.3548)
     else:
         raise ValueError(f'The kernel_fwhm ({kernel_fwhm}) has to be >=0!')
 
@@ -441,3 +442,81 @@ def polys_to_mask(polys, mask_shape):
     mask = rasterize(sList, out_shape=mask_shape).astype('bool')
     return mask
 
+def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8, 
+                   kernel_fwhm=0, expand_factor=1.2, bounds:list=None, 
+                   choose_coord=None, plot=False, norm_kwargs=None, 
+                   interactive=False, verbose=True):
+    '''
+    Generate the mask in a specified region.
+    '''
+    if bounds is None:
+        img = image
+    else:
+        xmin, xmax, ymin, ymax = bounds
+        slice_x = slice(xmin, xmax)
+        slice_y = slice(ymin, ymax)
+        img = image[slice_y, slice_x]
+
+    smap, cdata = get_image_segmentation(img, threshold=threshold, 
+                                         kernel_fwhm=kernel_fwhm, 
+                                         npixels=npixels, 
+                                         mask=mask, 
+                                         connectivity=connectivity, 
+                                         plot=False)
+
+    if choose_coord is None:
+        mask = smap.data > 0
+    else:
+        x, y = choose_coord
+        mask = smap.data == smap.data[int(y)-ymin, int(x)-xmin]
+
+    mask_e = scale_mask(mask, factor=expand_factor, connectivity=connectivity)
+
+    if bounds is None:
+        mask = mask_e
+    else:
+        mask = np.zeros_like(image, dtype=bool)
+        mask[slice_y, slice_x] = mask_e
+
+
+    if plot:
+        if interactive:
+            ipy = get_ipython()
+            ipy.run_line_magic('matplotlib', 'tk')
+
+            def on_close(event):
+                ipy.run_line_magic('matplotlib', 'inline')
+
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+        fig.subplots_adjust(wspace=0.05)
+
+        if interactive:
+            fig.canvas.mpl_connect('close_event', on_close)
+        
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+        norm = simple_norm(image, **norm_kwargs)
+
+        ax = axs[0]
+        ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+        
+        if bounds is not None:
+            x = [bounds[0], bounds[0], bounds[1], bounds[1], bounds[0]]
+            y = [bounds[2], bounds[3], bounds[3], bounds[2], bounds[2]]
+            ax.plot(x, y, ls='--', color='red')
+        
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Image', fontsize=18)
+
+        ax = axs[1]
+        ax.imshow(smap, origin='lower', cmap=smap.cmap, interpolation='nearest')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        plot_mask_contours(mask_e, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Segmentation map', fontsize=18)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+    return mask, cdata

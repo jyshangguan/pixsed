@@ -29,7 +29,7 @@ from scipy import interpolate
 
 from shapely.geometry import shape
 from .utils import read_coordinate, plot_image, circular_error_estimate
-from .utils import xmatch_gaiadr3, get_image_segmentation
+from .utils import xmatch_gaiadr3, get_image_segmentation, plot_mask_contours
 from .utils import scale_mask, get_mask_polygons, add_mask_circle, poly_to_xy
 from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
@@ -182,11 +182,13 @@ class Image(object):
                     'The background mask (_mask_segmentation) is not generated! Please run mask_segmentation()!')
             else:
                 mask = self._mask_segmentation
-        else:
+        elif mask_type == 'background':
             if not hasattr(self, '_mask_background'):
                 raise ValueError(
                     'The background mask (_mask_background) is not generated! Please run mask_background()!')
             mask = self._mask_background
+        else:
+            raise ValueError(f'The mask_type ({mask_type}) is not recognized!')
 
         res = sigma_clipped_stats(self._data, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
         self._bkg_mean, self._bkg_median, self._bkg_std = res
@@ -849,16 +851,6 @@ class Image(object):
             ax.plot(self._coord_pix[0], self._coord_pix[1], marker='+', color='r', ms=10)
         return ax
 
-    #def plot_segmentation(self, ax=None):
-    #    '''
-    #    Plot the segmentation.
-    #    '''
-    #    if ax is None:
-    #        fig, ax = plt.subplots(figsize=(7, 7))
-
-    #    ax.imshow(self._segmentation, origin='lower', cmap=self._segmentation.cmap)
-    #    return ax
-
     def remove_sources_simple(self, l_half=18, catalog=None, min_ra=3, max_ra=50):
         '''
         Remove the contaminating sources in the image. Should run mask_stars() first.
@@ -1253,6 +1245,182 @@ class Image(object):
         [SGJY added]
         '''
         self._mask_manual = None
+
+
+    def gen_mask_background(self, threshold_nstd=1, npixels=12, mask=None, connectivity=8, 
+                            kernel_fwhm=0, expand_factor=1.2, plot=False, 
+                            norm_kwargs=None, interactive=False, verbose=True): 
+        '''
+        Generate the mask of the background.
+
+        Parameters
+        ----------
+        threshold_nstd : float (default: 1)
+            Threshold of image segmentation in the unit of background STD.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask (optional) : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} optional
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 0)
+            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+        expand_factor : float (default: 1.2)
+            Expand the mask by this factor.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        #_, med, std = sigma_clipped_stats(self._data, mask=mask, sigma=sigma)
+        assert self._bkg_median is not None, 'Please run background_properties() first to get _bkg_median!'
+        assert self._bkg_std is not None, 'Please run background_properties() first to get _bkg_std!'
+
+        img_sub = self._data - self._bkg_median
+
+        thres = threshold_nstd * self._bkg_std
+        smap, cdata = get_image_segmentation(img_sub, thres, 
+                                             kernel_fwhm=kernel_fwhm, 
+                                             npixels=npixels, 
+                                             mask=mask, 
+                                             connectivity=connectivity, 
+                                             plot=False)
+        mask = smap.data > 0
+        mask_e = scale_mask(mask, factor=expand_factor, connectivity=connectivity)
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.05)
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+            
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(img_sub, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(img_sub, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(mask_e, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+
+            ax.set_title('Background subtracted image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(smap, origin='lower', cmap=smap.cmap, interpolation='nearest')
+            plot_mask_contours(mask_e, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_title('Segmentation map', fontsize=18)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+
+        self._mask_background = mask_e
+        return mask_e, cdata
+
+
+    def gen_background_model(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
+        """
+        Generate the background model.Using median background method.
+        Parameter
+        ----------
+        box_size: int or tuple (ny, nx)
+            The size used to calculate the local median.
+            If None, the default size is 1/30 of the image size.
+            It is better not to use a too small box size, otherwise there is 
+            a high risk to remove the source emission.
+        filter_size: int or tuple (ny, nx) (default: 5)
+            The kernel size used to smooth the background model.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+
+        Notes
+        -----
+        [SGJY added]
+        """
+        ny, nx = self._data.shape
+
+        if not box_size:
+            box_size = (ny//30, nx//30)
+
+        mask_background = self._mask_background
+        sigma_clip = SigmaClip(sigma=3.)
+        bkg_estimator = MedianBackground()
+        bkg = Background2D(self._data, box_size, mask=mask_background, 
+                           filter_size=(filter_size, filter_size),
+                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+        self._background_model = bkg.background
+
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=80, stretch='asinh', asinh_a=0.1)
+            norm = simple_norm(self._data, **norm_kwargs)
+            ax = axs[0]
+            ax.imshow(self._data, cmap='Greys_r', origin='lower', norm=norm)
+            ax.set_title('Data', fontsize=16)
+            
+            ax = axs[1]
+            ax.imshow(self._background_model, cmap='Greys_r', origin='lower', norm=norm)
+            ax.set_title('Background model', fontsize=16)
+
+
+    def background_subtract2(self, plot=False, norm_kwargs=None):
+        '''
+        Remove the background of the image data.
+        Parameter
+        ----------
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        assert hasattr(self, '_background_model'), 'Please run background_model() first!'
+        self._data_subbkg = self._data - self._background_model
+        
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=90, stretch='asinh', asinh_a=0.1)
+            
+            ax = axs[0]
+            norm = simple_norm(self._data, **norm_kwargs)
+            ax.imshow(self._data, cmap='Greys_r', origin='lower', norm=norm)
+            ax.set_title('Original image', fontsize=16)
+
+            ax = axs[1]
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+            ax.imshow(self._data_subbkg, cmap='Greys_r', origin='lower', norm=norm)
+            ax.set_title('Background subtracted', fontsize=16)
+
 
 
 class Atlas(object):
