@@ -8,6 +8,7 @@ from astropy.visualization import PercentileInterval, simple_norm
 from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.xmatch import XMatch
 from astropy.convolution import convolve
+from astropy.wcs import WCS
 import tqdm
 
 from photutils.segmentation import make_2dgaussian_kernel, detect_sources, deblend_sources
@@ -16,7 +17,6 @@ from rasterio.features import rasterize, shapes
 from shapely.geometry import shape
 from shapely.affinity import scale
 from scipy.ndimage import gaussian_filter
-#from reproject import 
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -442,12 +442,52 @@ def polys_to_mask(polys, mask_shape):
     mask = rasterize(sList, out_shape=mask_shape).astype('bool')
     return mask
 
+
 def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8, 
                    kernel_fwhm=0, expand_factor=1.2, bounds:list=None, 
                    choose_coord=None, plot=False, norm_kwargs=None, 
                    interactive=False, verbose=True):
     '''
     Generate the mask in a specified region.
+
+    Parameters
+    ----------
+    threshold : float
+        Threshold of image segmentation.
+    npixels : int
+        The minimum number of connected pixels, each greater than threshold, 
+        that an object must have to be detected. npixels must be a positive 
+        integer.
+    mask (optional) : 2D bool array
+        A boolean mask, with the same shape as the input data, where True 
+        values indicate masked pixels. Masked pixels will not be included in 
+        any source.
+    connectivity : {4, 8} optional
+        The type of pixel connectivity used in determining how pixels are 
+        grouped into a detected source. The options are 4 or 8 (default). 
+        4-connected pixels touch along their edges. 8-connected pixels touch 
+        along their edges or corners.
+    kernel_fwhm : float (default: 0)
+        The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+    expand_factor : float (default: 1.2)
+        Expand the mask by this factor.
+    bounds : list 
+        The bounds of the box to make the mask, (xmin, xmax, ymin, ymax).
+    choose_coord (optional) : tuple of x and y
+        The pixel coordinate of the target to generate the mask.  
+        If provided, the function will only generate the mask for the segment 
+        containing the input pixel.
+    plot : bool (default: False)
+        Plot the data and segmentation map if True.
+    norm_kwargs (optional) : dict
+        The keywords to normalize the data image.
+    interactive : bool (default: False)
+        Use the interactive plot if True.
+    verbose : bool (default: True)
+
+    Notes
+    -----
+    [SGJY added]
     '''
     if bounds is None:
         img = image
@@ -456,7 +496,7 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
         slice_x = slice(xmin, xmax)
         slice_y = slice(ymin, ymax)
         img = image[slice_y, slice_x]
-
+    
     smap, cdata = get_image_segmentation(img, threshold=threshold, 
                                          kernel_fwhm=kernel_fwhm, 
                                          npixels=npixels, 
@@ -466,9 +506,14 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
 
     if choose_coord is None:
         mask = smap.data > 0
+    
     else:
         x, y = choose_coord
-        mask = smap.data == smap.data[int(y)-ymin, int(x)-xmin]
+
+        if bounds is None:
+            mask = smap.data == smap.data[int(y), int(x)]
+        else:
+            mask = smap.data == smap.data[int(y)-ymin, int(x)-xmin]
 
     mask_e = scale_mask(mask, factor=expand_factor, connectivity=connectivity)
 
