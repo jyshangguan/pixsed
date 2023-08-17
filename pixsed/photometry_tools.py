@@ -151,7 +151,7 @@ class Image(object):
         ax[0].imshow(self._data, cmap='gray', norm=norm, origin='lower')
         ax[1].imshow(self._background_model, cmap='gray', origin='lower')
 
-    def background_properties(self, mask_type='quick', sigma=3, maxiters=5, **kwargs):
+    def background_properties(self, mask_type='quick', sigma=3, maxiters=5, f_sample=-1, **kwargs):
         '''
         Calculate the mean, median, and std of the background using sigma clip.
 
@@ -191,9 +191,17 @@ class Image(object):
         else:
             raise ValueError(f'The mask_type ({mask_type}) is not recognized!')
 
-        res = sigma_clipped_stats(self._data, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
+        if f_sample > 0:
+            assert f_sample < 1, f'f_sample ({f_sample}) should be <1!'
+            d = self._data.flatten()
+            samples = np.random.choice(d, size=int(f_sample * len(d)), replace=False)
+        else:
+            samples = self._data.flatten()
+
+        res = sigma_clipped_stats(samples, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
+
 
     def background_subtract(self, method='full'):
         """
