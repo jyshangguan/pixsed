@@ -1,6 +1,7 @@
 import random
 from math import log, sqrt, ceil, log10
 import os
+from copy import deepcopy
 
 import astropy.units as u
 import extinction
@@ -24,7 +25,7 @@ from photutils.detection import DAOStarFinder
 from photutils.profiles import RadialProfile, CurveOfGrowth
 from photutils.segmentation import (detect_sources, make_2dgaussian_kernel, 
                                     deblend_sources, SourceCatalog, SourceFinder)
-from reproject import reproject_adaptive
+from reproject import reproject_interp
 from scipy import interpolate
 
 from shapely.geometry import shape
@@ -1247,7 +1248,7 @@ class Image(object):
         self._mask_manual = None
 
 
-    def gen_mask_background(self, threshold_nstd=1, npixels=12, mask=None, connectivity=8, 
+    def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8, 
                             kernel_fwhm=0, expand_factor=1.2, plot=False, 
                             norm_kwargs=None, interactive=False, verbose=True): 
         '''
@@ -1255,8 +1256,8 @@ class Image(object):
 
         Parameters
         ----------
-        threshold_nstd : float (default: 1)
-            Threshold of image segmentation in the unit of background STD.
+        threshold : float
+            Threshold of image segmentation.
         npixels : int
             The minimum number of connected pixels, each greater than threshold, 
             that an object must have to be detected. npixels must be a positive 
@@ -1292,8 +1293,7 @@ class Image(object):
 
         img_sub = self._data - self._bkg_median
 
-        thres = threshold_nstd * self._bkg_std
-        smap, cdata = get_image_segmentation(img_sub, thres, 
+        smap, cdata = get_image_segmentation(img_sub, threshold, 
                                              kernel_fwhm=kernel_fwhm, 
                                              npixels=npixels, 
                                              mask=mask, 
@@ -1336,7 +1336,6 @@ class Image(object):
             ax.set_xlim(xlim); ax.set_ylim(ylim)
 
         self._mask_background = mask_e
-        return mask_e, cdata
 
 
     def gen_background_model(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
@@ -1379,6 +1378,7 @@ class Image(object):
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=80, stretch='asinh', asinh_a=0.1)
             norm = simple_norm(self._data, **norm_kwargs)
+
             ax = axs[0]
             ax.imshow(self._data, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Data', fontsize=16)
@@ -1421,6 +1421,75 @@ class Image(object):
             ax.imshow(self._data_subbkg, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Background subtracted', fontsize=16)
 
+
+    def rebin_image(self, factor=10, plot=False, norm_kwargs=None):
+        '''
+        Rebin the image to reduce the image size.
+
+        Parameters
+        ----------
+
+        '''
+        rebin_wcs = deepcopy(self._wcs)
+        rebin_wcs.wcs.crpix = self._wcs.wcs.crpix / factor
+        rebin_wcs.wcs.cdelt = self._wcs.wcs.cdelt * factor
+
+        shape_out = (rebin_wcs.pixel_shape[0]//factor, rebin_wcs.pixel_shape[1]//factor)
+        rebin_wcs.pixel_shape = shape_out
+
+        self._data_rebin, _ = reproject_interp((self._data, self._wcs), rebin_wcs, shape_out=shape_out)
+        self._rebin_wcs = rebin_wcs
+
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            
+            ax = axs[0]
+            norm = simple_norm(self._data, **norm_kwargs)
+            ax.imshow(self._data, origin='lower', norm=norm)
+            
+            ax = axs[1]
+            norm = simple_norm(self._data_rebin, **norm_kwargs)
+            ax.imshow(self._data_rebin, origin='lower', norm=norm)
+        
+
+    def scale_rebin_mask(self, mask, plot=False, norm_kwargs=None, verbose=False):
+        '''
+        Scale the mask generated from the rebinned image back to the original 
+        pixel scale of the image.
+
+        Parameters
+        ----------
+        mask : 2D array
+            The mask of the rebinned image, to be scaled up.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        verbose : bool (default: True)
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        mask_s, _ = reproject_interp((mask, self._rebin_wcs), self._wcs, shape_out=self._wcs.pixel_shape)
+
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=90, stretch='asinh', asinh_a=0.1)
+            
+            ax = axs[0]
+            norm = simple_norm(self._data, **norm_kwargs)
+            ax.imshow(self._data, origin='lower', cmap='Greys_r', norm=norm)
+            plot_mask_contours(mask_s, ax=ax, color='cyan', verbose=verbose)
+            
+            ax = axs[1]
+            ax.imshow(mask_s, origin='lower', cmap='Greys_r')
+        return mask_s
 
 
 class Atlas(object):
