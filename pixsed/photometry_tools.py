@@ -1,3 +1,4 @@
+import tqdm
 import random
 from math import log, sqrt, ceil, log10
 import os
@@ -1751,10 +1752,23 @@ class Image(object):
 
     
     def gen_PSF_model(self, extract_size=25, plx_snr=3, threshold_flux=None, 
-                      threhold_eccentricity=0.1, mask=None, plot=False, 
-                      norm_kwargs=None):
+                      threshold_eccentricity=0.15, num_lim=54, mask=None, 
+                      oversampling=4, smoothing_kernel='quadratic', maxiters=3, 
+                      progress_bar=True, skip_psf_model=False, plot=False, 
+                      fig=None, axs1=None, axs2=None, norm_kwargs=None, nrows=6, 
+                      ncols=9):
         '''
-        Generate the source table in the field.
+        Select the good stars and generate the PSF model.
+
+        Parameters
+        ----------
+
+        Notes
+        -----
+        FIXME: We can add more selection by whether there are more than one segements 
+        in extracted image of the star.
+
+        [SGJY added]
         '''
         assert hasattr(self, '_data_convolved'), 'The _data_convolved is lacking!'
         assert hasattr(self, '_segment_results'), 'The _segment_results is lacking!'
@@ -1767,14 +1781,333 @@ class Image(object):
 
         tb.sort('segment_flux', reverse=True)
 
-        fltr = tb['eccentricity'] < threhold_eccentricity
+        fltr = tb['eccentricity'] < threshold_eccentricity
 
         if threshold_flux is not None:
-            fltr |= tb['segment_flux'] < threshold_flux
+            fltr &= tb['segment_flux'] < threshold_flux
         
         tb_sel = tb[fltr]
+        
+        # Cut the number of the star table
+        if len(tb_sel) > num_lim:
+            tb_sel = tb_sel[:num_lim]
+        self._psf_table = tb_sel
 
-        return tb, tb_sel
+        # Extract the stars
+        nddata = NDData(data=self._data_subbkg)
+        self._psf_stars = extract_stars(nddata, tb_sel, size=extract_size)
+        nstars = len(self._psf_stars)
+
+        if skip_psf_model:
+            self._psf_model = None
+            self._psf_data = None
+            self._psf_oversample = None
+        else:
+            epsf_builder = EPSFBuilder(oversampling=oversampling, 
+                                       smoothing_kernel=smoothing_kernel, 
+                                       maxiters=maxiters, progress_bar=progress_bar)
+            epsf, fitted_stars = epsf_builder(self._psf_stars)
+            self._psf_model = epsf
+            self._psf_data = epsf.data
+            self._psf_oversample = oversampling
+
+        if plot:
+            if fig is None:
+                fig = plt.figure(figsize=(21, 21))
+
+                panel_gap = 0.01
+                panel_size = 0.25
+                ax1 = fig.add_axes([0.05, 0.68, panel_size, panel_size])
+                ax2 = fig.add_axes([0.35, 0.68, panel_size, panel_size])
+                ax3 = fig.add_axes([0.05, 0.94, 0.55, 0.02])
+                ax4 = fig.add_axes([0.63, 0.68, panel_size, panel_size])
+                ax5 = fig.add_axes([0.89, 0.68, 0.02, panel_size])
+                ax6 = fig.add_axes([0.05, 0.05, 0.95, 0.55])
+                ax6.set_ylabel('Selected PSF stars', fontsize=24, labelpad=15)
+                ax6.spines['top'].set_visible(False)
+                ax6.spines['right'].set_visible(False)
+                ax6.spines['bottom'].set_visible(False)
+                ax6.spines['left'].set_visible(False)
+                ax6.set_xticklabels([])
+                ax6.set_yticklabels([])
+                ax6.tick_params(which='both', length=0)
+                
+                grid_gap = panel_gap / 2
+                size_x = 0.9 / ncols
+                size_y = 0.6 / nrows
+                grid_start = [0.05, 0.65-size_y-panel_gap]
+                
+                axs2 = []
+                for l_x in range(ncols):
+                    axs_y = []
+                    axs2.append(axs_y)
+                    for l_y in range(nrows):
+                        x0 = grid_start[0] + l_x * (size_x + grid_gap)
+                        y0 = grid_start[1] - l_y * (size_y + grid_gap)
+                        ax = fig.add_axes([x0, y0, size_x, size_y])
+                        ax.set_xticklabels([])
+                        ax.set_yticklabels([])
+                        ax.tick_params(which='both', length=0)
+                        axs_y.append(ax)
+                axs2 = np.array(axs2)  # From top down
+            else:
+                assert axs1 is not None, 'Need to provide three axes!'
+                assert axs2 is not None, 'Need to provide the axes grid for the stars'
+                ax1, ax2, ax3 = axs1
+        
+            # Plot the star properties -- flux v.s. area
+            mp = ax1.scatter(np.log10(tb['segment_flux']), np.log10(tb['area']), 
+                             c=tb['Gmag'])
+
+            ax1.plot(np.log10(tb_sel['segment_flux']), np.log10(tb_sel['area']), 
+                     ls='none', marker='.', color='red', label='Selected')
+
+            if threshold_flux is not None:
+                ax1.axvline(x=np.log10(threshold_flux), ls='--', lw=1.5, color='red', alpha=0.8)
+
+            ax1.legend(loc='upper left', fontsize=18, handlelength=1)
+            ax1.set_xlabel(r'$\log\,Flux$', fontsize=24)
+            ax1.set_ylabel(r'$\log\,(Area / \mathrm{pixel}^2)$', fontsize=24)
+            ax1.minorticks_on()
+            
+            # Plot the star properties -- flux v.s. eccentricity
+            mp = ax2.scatter(np.log10(tb['segment_flux']), tb['eccentricity'], c=tb['Gmag'])
+
+            ax2.plot(np.log10(tb_sel['segment_flux']), tb_sel['eccentricity'], 
+                     ls='none', marker='.', color='red')
+
+            ax2.axhline(y=threshold_eccentricity, ls='--', lw=1.5, color='red', alpha=0.8, label='Criteria')
+            if threshold_flux is not None:
+                ax2.axvline(x=np.log10(threshold_flux), ls='--', lw=1.5, color='red', alpha=0.8)
+
+            ax2.legend(loc='upper left', fontsize=18)
+            ax2.set_xlim(ax1.get_xlim())
+            ax2.set_xlabel(r'$\log\,Flux$', fontsize=24)
+            ax2.set_ylabel(r'Eccentricity', fontsize=24)
+            ax2.minorticks_on()
+            
+            # Add colorbar of Gmag
+            cb = plt.colorbar(mp, cax=ax3, orientation='horizontal')
+            cb.set_label(r'$G$ (mag)', fontsize=24)
+            ax3.xaxis.set_label_position('top')
+            ax3.xaxis.tick_top()
+            cb.minorticks_on()
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99, stretch='asinh', asinh_a=0.001)
+
+            # Plot the PSF model
+            if skip_psf_model:
+                ax4.text(0.5, 0.5, 'Skipped the PSF model...', fontsize=24,
+                         transform=ax4.transAxes, ha='center', va='center')
+                ax4.axis('off')
+                ax5.axis('off')
+            else:
+                norm = simple_norm(self._psf_data, **norm_kwargs)
+                mp = ax4.imshow(self._psf_data, norm=norm, origin='lower', 
+                                cmap='viridis')
+                ax4.set_title('PSF model', fontsize=24)
+                plt.colorbar(mp, cax=ax5, orientation='vertical')
+
+            # Plot all the stars
+            for l_y in range(nrows):
+                for l_x in range(ncols):
+                    ax = axs2[l_x, l_y]
+                    idx = l_x + l_y * ncols
+
+                    if idx < nstars:
+                        star = self._psf_stars[idx]
+                        norm = simple_norm(star, **norm_kwargs)
+                        ax.imshow(star, norm=norm, origin='lower', cmap='viridis')
+                        ax.text(0.05, 0.05, f'{idx}', fontsize=18, color='white', 
+                                transform=ax.transAxes, ha='left', va='bottom')
+                    else:
+                        ax.axis('off')
+
+
+    def get_PSF_profile(self, enclosed_energy=0.99, plot=False, axs=None):
+        '''
+        Get the PSF profile and FWHM of the PSF.
+        '''
+        from photutils.centroids import centroid_quadratic
+
+        data = self._psf_data
+        ny, nx = data.shape
+        xpeak = nx // 2
+        ypeak = ny // 2
+        xycen = centroid_quadratic(data, xpeak=xpeak, ypeak=ypeak)
+        
+        edge_radii = np.arange(ny)
+        rp = RadialProfile(data, xycen, edge_radii, error=None, mask=None)
+        
+        fltr = ~np.isnan(rp.profile)
+        rp_norm = rp.profile[fltr] / np.max(rp.profile[fltr])
+        r_rp_pix = rp.radius[fltr] / self._psf_oversample
+        f_rp = interpolate.interp1d(rp_norm, r_rp_pix)
+        fwhm_pix = f_rp(0.5) * 2
+        fwhm_as = fwhm_pix * self._pxs
+        
+        radii = np.arange(1, ny)
+        cog = CurveOfGrowth(data, xycen, radii, error=None, mask=None)
+        cog_norm = cog.profile / np.max(cog.profile)
+        r_cog_pix = cog.radius / self._psf_oversample
+        f_cog = interpolate.interp1d(cog_norm, r_cog_pix)
+        r_env_pix = f_cog(enclosed_energy)
+        r_env_as = r_env_pix * self._pxs
+
+        self._psf_fwhm = fwhm_pix * self._pxs
+        self._psf_fwhm_pix = fwhm_pix
+        self._psf_enclose_radius = r_env_pix
+
+        if plot:
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+                fig.subplots_adjust(wspace=0.1)
+
+            locator = plt.MaxNLocator(nbins=5)
+        
+            ax = axs[0]
+            ax.plot(r_rp_pix, rp_norm, color='k')
+            ax.axvline(fwhm_pix / 2, ls='--', color='r')
+            ax.axhline(y=0.5, ls='--', color='r')
+        
+            ax.set_xlabel('Radius (pixel)', fontsize=24)
+            ax.set_ylabel('Normalized flux', fontsize=24)
+            ax.minorticks_on()
+            ax.xaxis.set_major_locator(locator)
+            ax.text(0.95, 0.95, f'FWHM={fwhm_as:.2f}"', fontsize=18, 
+                    transform=ax.transAxes, ha='right', va='top')
+
+            axu = ax.twiny()
+            xlim = np.array(ax.get_xlim()) * self._pxs
+            axu.set_xlim(xlim)
+            axu.set_xlabel('Radius (arcsec)', fontsize=24)
+            axu.minorticks_on()
+        
+            ax = axs[1]
+            ax.plot(r_cog_pix, cog_norm, color='k')
+            ax.axhline(y=enclosed_energy, ls='--', color='r')
+            ax.axvline(x=r_env_pix, ls='--', color='r')
+            ax.set_xlabel('Radius (pixel)', fontsize=24)
+            ax.minorticks_on()
+            ax.xaxis.set_major_locator(locator)
+            ax.text(0.95, 0.05, f'R({enclosed_energy*100:.1f}%)={r_env_as:.2f}"', fontsize=18, 
+                    transform=ax.transAxes, ha='right', va='bottom')
+
+            axu = ax.twiny()
+            xlim = np.array(ax.get_xlim()) * self._pxs
+            axu.set_xlim(xlim)
+            axu.set_xlabel('Radius (arcsec)', fontsize=24)
+            axu.minorticks_on()
+
+
+    def gen_mask_overlap(self, detect_thres=5., xmatch_radius=3., 
+                         threshold_plx=2, threshold_gmag=None, 
+                         mask_radius=None, center_radius=5., 
+                         plot=False, fig=None, axs=None, norm_kwargs=None, 
+                         interactive=False, verbose=False):
+        '''
+        Get the foreground stars that overlap with the target galaxy.
+        Parameter
+        -----------
+        detect_thres: float
+            The threshold for DAOFinder.
+        xmatch_radius: float
+            The xmatch radius. arcsec.
+        threshold_gmag: float
+            The max G band magnitude of the stars which will be picked out.
+        threshold_pss (optional): float
+            The threshold to select stars according to Gaia probability of single star.
+        threshold_plx (optional): float
+            The threshold to select stars according to Gaia parallax SNR.
+        
+        Return
+        ---------
+        A table contains Ra, Dec, and Gmag.
+        '''
+        assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
+        assert hasattr(self, '_segment_results'), 'Please run detect_source_extended() first!'
+
+        # initial detection
+        target_mask_i = self._segment_results['target_mask_i']
+        daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_fwhm_pix)
+        sources = daofind(self._data_subbkg, mask=~target_mask_i)
+            
+        mask = np.zeros_like(self._data_subbkg, dtype=bool)
+
+        # Gaia Xmatch
+        w = self._wcs
+        if sources:
+            c = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
+            sources_world = Table([c.ra.deg, c.dec.deg, sources['xcentroid'], 
+                                   sources['ycentroid']], 
+                                   names=['ra', 'dec', 'x', 'y'])
+            t_o = xmatch_gaiadr3(sources_world, xmatch_radius, colRA1='ra', colDec1='dec')  # Gaia xmatch.
+
+            dist = np.sqrt((t_o['x'] - self._coord_pix[0])**2 + (t_o['y'] - self._coord_pix[1])**2)
+            fltr = dist > center_radius
+
+            plx_snr = (t_o['Plx'] / t_o['e_Plx']) 
+            fltr &= (plx_snr > threshold_plx) & ~t_o['Plx'].mask
+            
+            if threshold_gmag is not None:
+                fltr &= (t_o['Gmag'] < threshold_gmag)
+
+            t_s = t_o[fltr]
+
+            if mask_radius is None:
+                mask_radius = self._psf_enclose_radius
+
+            if verbose:
+                print(f'Found {len(t_s)} stars!')
+                coord_m = tqdm.tqdm(zip(t_s['x'], t_s['y']))
+            else:
+                coord_m = zip(t_s['x'], t_s['y'])
+
+            for (x, y) in coord_m:
+                add_mask_circle(mask, x, y, mask_radius)
+            
+            self._mask_overlap = mask
+        else:
+            self._mask_overlap = mask
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            ax.plot(sources['xcentroid'], sources['ycentroid'], ls='none', 
+                    marker='+', ms=5, mfc='none', mec='orange', mew=0.5, alpha=1)
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(mask, origin='lower', cmap='Greys_r')
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Overlap mask', fontsize=18)
 
 
 
