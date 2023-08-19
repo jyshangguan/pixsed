@@ -1,4 +1,7 @@
+import tqdm
+import warnings
 import numpy as np
+from copy import deepcopy
 import astropy.units as u
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
@@ -9,12 +12,15 @@ from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.xmatch import XMatch
 from astropy.convolution import convolve
 from astropy.wcs import WCS
-import tqdm
+from astropy.table import Table
+from astropy.modeling import models, fitting
+from astropy.nddata import Cutout2D
+from astropy.utils.exceptions import AstropyUserWarning
 
 from photutils.segmentation import make_2dgaussian_kernel, detect_sources, deblend_sources
-from photutils.segmentation import SourceFinder
+from photutils.segmentation import SourceFinder, SegmentationImage, SourceCatalog
 from rasterio.features import rasterize, shapes
-from shapely.geometry import shape
+from shapely.geometry import shape, MultiPoint
 from shapely.affinity import scale
 from scipy.ndimage import gaussian_filter
 
@@ -239,7 +245,8 @@ def plot_mask_contours(mask, ax=None, verbose=False, **plot_kwargs):
     return ax
 
 
-def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None, norm_kwargs=None):
+def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None, 
+                     norm_kwargs=None):
     '''
     Get the patch of the image that fits the target mask.
 
@@ -275,6 +282,7 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None, norm
     poly = shape(pList[0])
     xy_poly = np.c_[poly.exterior.xy]
 
+    coord_pix = np.array(coord_pix)
     r = np.sqrt(np.sum((xy_poly - coord_pix[np.newaxis, :])**2, axis=1))
         
     a_box = r.max() * factor
@@ -308,9 +316,10 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None, norm
 
 
 def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8, 
-                           kernel_fwhm=2, deblend=False, nlevels=32, contrast=0.001, 
+                           kernel_fwhm=0, deblend=False, nlevels=32, contrast=0.001, 
                            mode='linear', nproc=1, progress_bar=True, 
-                           plot=False, axs=None, norm_kwargs=None):
+                           plot=False, axs=None, norm_kwargs=None, 
+                           interactive=False):
     '''
     Get the image segmentation.
 
@@ -333,7 +342,7 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
         grouped into a detected source. The options are 4 or 8 (default). 
         4-connected pixels touch along their edges. 8-connected pixels touch 
         along their edges or corners.
-    kernel_fwhm : float (default: 2)
+    kernel_fwhm : float (default: 0)
         The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
     plot : bool (default: False)
         Plot the data and segmentation map if True.
@@ -341,6 +350,8 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
         The axes to plot the data and segmentation map. Must be >=2 panels.
     norm_kwargs (optional) : dict
         The keywords to normalize the data image.
+    interactive : bool (default: False)
+        Use the interactive plot if True.
 
     Returns
     -------
@@ -360,8 +371,6 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
     else:
         raise ValueError(f'The kernel_fwhm ({kernel_fwhm}) has to be >=0!')
 
-    #segment_map = detect_sources(convolved_data, threshold=threshold, npixels=npixels, 
-    #                             connectivity=connectivity, mask=mask)
     finder = SourceFinder(npixels=npixels, connectivity=connectivity, 
                           deblend=deblend, nlevels=nlevels, contrast=contrast, 
                           mode=mode, relabel=True, nproc=nproc, 
@@ -369,11 +378,19 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
     segment_map = finder(convolved_data, threshold=threshold, mask=mask)
 
     if plot:
-        if not axs:
-            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
-            plain = False
-        else:
-            plain = True
+        if interactive:
+            ipy = get_ipython()
+            ipy.run_line_magic('matplotlib', 'tk')
+
+            def on_close(event):
+                ipy.run_line_magic('matplotlib', 'inline')
+        
+        if axs is None:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+
+        if interactive:
+            fig.canvas.mpl_connect('close_event', on_close)
+
         if norm_kwargs is None:
             norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
 
@@ -381,12 +398,12 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
 
         ax = axs[0]
         ax.imshow(convolved_data, origin='lower', cmap='Greys_r', norm=norm)
-        ax = axs[1]
-        ax.imshow(segment_map, origin='lower', cmap=segment_map.cmap)
+        ax.set_title('Convolved data', fontsize=16)
 
-        if not plain:
-            axs[0].set_title('Convolved data')
-            axs[1].set_title('Segmentation Image')
+        ax = axs[1]
+        ax.imshow(segment_map, origin='lower', cmap=segment_map.cmap, interpolation='nearest')
+        ax.set_title('Segmentation Image', fontsize=16)
+
     return segment_map, convolved_data
 
 
@@ -443,18 +460,21 @@ def polys_to_mask(polys, mask_shape):
     return mask
 
 
-def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8, 
-                   kernel_fwhm=0, expand_factor=1.2, bounds:list=None, 
-                   choose_coord=None, plot=False, norm_kwargs=None, 
-                   interactive=False, verbose=True):
+def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8, 
+                   kernel_fwhm=0, deblend=False, nlevels=32, contrast=0.001, 
+                   mode='linear', nproc=1, progress_bar=True, expand_factor=1.2, 
+                   bounds:list=None, choose_coord=None, plot=False, fig=None, 
+                   axs=None, norm_kwargs=None, interactive=False, verbose=True): 
     '''
     Generate the mask in a specified region.
 
     Parameters
     ----------
+    image : 2D array
+        The image data.
     threshold : float
         Threshold of image segmentation.
-    npixels : int
+    npixels : int (default: 5)
         The minimum number of connected pixels, each greater than threshold, 
         that an object must have to be detected. npixels must be a positive 
         integer.
@@ -479,11 +499,16 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
         containing the input pixel.
     plot : bool (default: False)
         Plot the data and segmentation map if True.
+    fig : Matplotlib Figure
+        The figure to plot.
+    axs : Matplotlib Axes
+        The axes to plot. Two panels are needed.
     norm_kwargs (optional) : dict
         The keywords to normalize the data image.
     interactive : bool (default: False)
         Use the interactive plot if True.
     verbose : bool (default: True)
+        Show details if True.
 
     Notes
     -----
@@ -498,10 +523,12 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
         img = image[slice_y, slice_x]
     
     smap, cdata = get_image_segmentation(img, threshold=threshold, 
-                                         kernel_fwhm=kernel_fwhm, 
-                                         npixels=npixels, 
-                                         mask=mask, 
+                                         npixels=npixels, mask=mask, 
                                          connectivity=connectivity, 
+                                         kernel_fwhm=kernel_fwhm, 
+                                         deblend=deblend, nlevels=nlevels, 
+                                         contrast=contrast, mode=mode, 
+                                         nproc=nproc, progress_bar=progress_bar, 
                                          plot=False)
 
     if choose_coord is None:
@@ -532,8 +559,11 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
             def on_close(event):
                 ipy.run_line_magic('matplotlib', 'inline')
 
-        fig, axs = plt.subplots(1, 2, figsize=(14, 7))
-        fig.subplots_adjust(wspace=0.05)
+        if axs is None:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.05)
+        else:
+            assert fig is not None, 'Please provide fig together with axs!'
 
         if interactive:
             fig.canvas.mpl_connect('close_event', on_close)
@@ -564,4 +594,434 @@ def gen_image_mask(image, threshold, npixels=12, mask=None, connectivity=8,
         ax.set_xticklabels([])
         ax.set_yticklabels([])
 
-    return mask, cdata
+    return mask, smap, cdata
+
+
+def segment_combine(segm1, segm2, progress_bar=False, plot=False):
+    '''
+    Combine two segmentations.
+    
+    Parameters
+    ----------
+    segm1, segm2 : SegmentationImage
+        The input segmentations.
+    progress_bar: bool (default: False)
+        Show the progress if True.
+    plot : bool (default: False)
+        Plot the results if True.
+    
+    Returns
+    -------
+    segm_combined : SegmentationImage
+        The combined segmentations.
+    '''
+    assert segm1.shape == segm2.shape, 'The two segments should have the same shape!'
+    
+    # Add the smaller segment to the larger segment to be fast.
+    if segm1.nlabels > segm2.nlabels:
+        segm_l = segm1
+        segm_s = segm2
+    else:
+        segm_l = segm2
+        segm_s = segm1
+    
+    data = segm_l.data.copy()
+    
+    if progress_bar:
+        labels = tqdm.tqdm(segm_s.labels)
+    else:
+        labels = segm_s.labels
+    
+    for l in labels:
+        data[segm_s.data == l] = segm_l.nlabels + l
+    
+    # Create a SegmentationImage using the data
+    segm_combined = SegmentationImage(data=data)
+    
+    if plot:
+        fig, axs = plt.subplots(1, 3, figsize=(21, 7), sharex=True, sharey=True)
+        
+        ax = axs[0]
+        ax.imshow(segm1, origin='lower', cmap=segm1.cmap, interpolation='nearest')
+        ax.set_title('Segm1', fontsize=16)
+        
+        ax = axs[1]
+        ax.imshow(segm2, origin='lower', cmap=segm2.cmap, interpolation='nearest')
+        ax.set_title('Segm2', fontsize=16)
+        
+        ax = axs[2]
+        ax.imshow(segm_combined, origin='lower', cmap=segm_combined.cmap, interpolation='nearest')
+        ax.set_title('Segm_combined', fontsize=16)
+        
+    return segm_combined
+
+
+def segment_add(segm, mask, plot=False):
+    '''
+    Add a masked region in the segmentation.
+
+    Parameters
+    ----------
+    segm : SegmentationImage 
+        The inpug SegmentationImage.
+    mask : 2D array
+        Mask of the region to be added.
+    plot : bool (default: False)
+        Plot the results if True.
+        
+    Returns
+    -------
+    segm_o : SegmentationImage
+        The output segmentation.
+    '''
+    data = segm.data.copy()
+    data[mask] = segm.nlabels + 1
+    segm_o = SegmentationImage(data=data)
+
+    if plot:
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+        
+        ax = axs[0]
+        ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
+        plot_mask_contours(mask, ax=ax, color='cyan', lw=0.5)
+        ax.set_title('Input SegmentationImage', fontsize=16)
+        
+        ax = axs[1]
+        ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
+        plot_mask_contours(mask, ax=ax, color='cyan', lw=0.5)
+        ax.set_title('Output SegmentationImage', fontsize=16)
+    return segm_o
+
+
+def segment_remove(segm, mask, overwrite=False, plot=False):
+    '''
+    Remove segments in the masked region.
+
+    Parameters
+    ----------
+    segm : SegmentationImage 
+        The inpug SegmentationImage.
+    mask : 2D array
+        Mask of the region to be added.
+    plot : bool (default: False)
+        Plot the results if True.
+        
+    Returns
+    -------
+    segm_o : SegmentationImage
+        The output segmentation.
+    '''
+    if overwrite:
+        segm_o = segm
+    else:
+        segm_o = deepcopy(segm)
+    
+    # Get the center of all the segments
+    cat = SourceCatalog(segm_o.data, segm_o, progress_bar=False)
+    tb = cat.to_table()
+    x_cent = tb['xcentroid']
+    y_cent = tb['ycentroid']
+    c_cent = np.c_[x_cent, y_cent]
+    mpoint = MultiPoint(c_cent)
+    
+    # Make the target polygon and select segments
+    p_mask = get_mask_polygons(mask)
+    s_mask = shape(p_mask[0])
+    
+    fltr = np.array([s_mask.contains(p) for p in mpoint.geoms])
+    labels = tb[fltr]['label'].data
+    segm_o.remove_labels(labels, relabel=True)
+
+    if plot:
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+        
+        ax = axs[0]
+        ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
+        plot_mask_contours(mask, ax=ax, color='cyan', lw=0.5)
+        ax.set_title('Input SegmentationImage', fontsize=16)
+        
+        ax = axs[1]
+        ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
+        plot_mask_contours(mask, ax=ax, color='cyan', lw=0.5)
+        ax.set_title('Output SegmentationImage', fontsize=16)
+        
+    return segm_o
+
+
+def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.array, 
+                           threshold_o:float, threshold_i:float, npixels_o=5, 
+                           npixels_i=5, nlevels_o=32, nlevel_i=256, contrast_o=0.001, 
+                           contrast_i=1e-6, connectivity=8, kernel_fwhm=0, 
+                           mode='linear', nproc=1, progress_bar=False,  
+                           plot=False, fig=None, axs=None, norm_kwargs=None, 
+                           interactive=False, verbose=False):
+    '''
+    Detect the image sources for an extended target. This function get 
+    the segmentations of the image in two steps, one inside the target_mask and 
+    one outside the target_mask.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    target_coord : tuple
+        The pixel coordinate of the target.
+    target_mask (optional) : 2D bool array
+        A boolean mask, with the same shape as the input data, where True 
+        values indicate masked pixels. For extended targets, we generate two 
+        segmentations with different parameters, one inside the target_mask and 
+        one outside the target_mask.
+    threshold_o : float
+        Threshold to generate the segmentation outside target mask.
+    threshold_i : float
+        Threshold to generate the segmentation inside target mask.
+    npixels_o : int (default: 5)
+        The minimum number of connected pixels, each greater than threshold, 
+        that an object must have to be detected. npixels must be a positive 
+        integer. It is for the outer segmentation.
+    npixels_i : int (default: 5)
+        The npixel for the inner segmentation.
+    nlevels_o : int (default: 32)
+        The number of multi-thresholding levels to use for deblending. Each 
+        source will be re-thresholded at nlevels levels spaced between its 
+        minimum and maximum values (non-inclusive). The mode keyword determines 
+        how the levels are spaced. It is for the outer segmentation.
+    nlevels_i : int (default: 32)
+        The nlevel for the inner segmentation.
+    contrast_o : float (default: 0.001)
+        The fraction of the total source flux that a local peak must have (at 
+        any one of the multi-thresholds) to be deblended as a separate object. 
+        contrast must be between 0 and 1, inclusive. If contrast=0 then every 
+        local peak will be made a separate object (maximum deblending). 
+        If contrast=1 then no deblending will occur. The default is 0.001, which 
+        will deblend sources with a 7.5 magnitude difference. It is for the 
+        outer segmentation.
+    contrast_i : float (default: 1e-6)
+        The contrast for the inner segmentation.
+    connectivity : {4, 8} optional
+        The type of pixel connectivity used in determining how pixels are 
+        grouped into a detected source. The options are 4 or 8 (default). 
+        4-connected pixels touch along their edges. 8-connected pixels touch 
+        along their edges or corners.
+    kernel_fwhm : float (default: 0)
+        The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+    mode : {'exponential', 'linear', 'sinh'}, optional
+        The mode used in defining the spacing between the multi-thresholding 
+        levels (see the nlevels keyword) during deblending. The 'exponential' 
+        and 'sinh' modes have more threshold levels near the source minimum and 
+        less near the source maximum. The 'linear' mode evenly spaces 
+        the threshold levels between the source minimum and maximum. 
+        The 'exponential' and 'sinh' modes differ in that the 'exponential' 
+        levels are dependent on the source maximum/minimum ratio (smaller ratios 
+        are more linear; larger ratios are more exponential), while the 'sinh' 
+        levels are not. Also, the 'exponential' mode will be changed to 'linear' 
+        for sources with non-positive minimum data values.
+    nproc : int (default: 1)
+        The number of processes to use for multiprocessing (if larger than 1). 
+        If set to 1, then a serial implementation is used instead of a parallel 
+        one. If None, then the number of processes will be set to the number of 
+        CPUs detected on the machine. Please note that due to overheads, 
+        multiprocessing may be slower than serial processing. This is especially 
+        true if one only has a small number of sources to deblend. The benefits 
+        of multiprocessing require ~1000 or more sources to deblend, with larger 
+        gains as the number of sources increase.
+    progress_bar : bool (default: False)
+        Show the progress bar in various steps.
+    plot : bool (default: False)
+        Plot the data and segmentation map if True.
+    fig : Matplotlib Figure
+        The figure to plot.
+    axs : Matplotlib Axes
+        The axes to plot. Two panels are needed.
+    norm_kwargs (optional) : dict
+        The keywords to normalize the data image.
+    interactive : bool (default: False)
+        Use the interactive plot if True.
+    verbose : bool (default: True)
+        Show details if True.
+
+    Notes
+    -----
+    [SGJY added]
+    '''
+    # Get the segments outside the target mask
+    segm_o, _ = get_image_segmentation(image, threshold_o, npixels=npixels_o, 
+                                       mask=target_mask, kernel_fwhm=kernel_fwhm, 
+                                       nlevels=nlevels_o, contrast=contrast_o,
+                                       connectivity=connectivity, mode=mode,
+                                       nproc=nproc, deblend=True, 
+                                       progress_bar=progress_bar)
+
+    # Get the segments inside the target mask
+    segm_i0 = detect_sources(image, threshold_i, npixels=npixels_i, mask=~target_mask)
+    debl_i = deblend_sources(image, segm_i0, npixels=npixels_i, labels=None, 
+                               nlevels=nlevel_i, contrast=contrast_i, mode=mode, 
+                               connectivity=connectivity, relabel=True, 
+                               nproc=nproc, progress_bar=progress_bar)
+    # Get the mask of the galaxy innter region
+    x_t, y_t = target_coord
+    target_mask_i = segm_i0.data == segm_i0.data[int(y_t), int(x_t)]
+    # Final segments; merged the segments inside target_mask_i.
+    segm_i = segment_add(debl_i, target_mask_i)  
+    
+    # Combine the segments
+    segm_c = segment_combine(segm_o, segm_i, progress_bar=progress_bar)
+    
+    # Remove the segments in the inner region of the target
+    segment_remove(segm_c, target_mask_i, overwrite=True)
+
+    if plot:
+        if interactive:
+            ipy = get_ipython()
+            ipy.run_line_magic('matplotlib', 'tk')
+
+            def on_close(event):
+                ipy.run_line_magic('matplotlib', 'inline')
+
+        if axs is None:
+            fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
+            fig.subplots_adjust(hspace=0.07, wspace=0.05)
+        else:
+            assert fig is not None, 'Please provide fig together with axs!'
+
+        if interactive:
+            fig.canvas.mpl_connect('close_event', on_close)
+        
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+        norm = simple_norm(image, **norm_kwargs)
+
+        ax = axs[0, 0]
+        ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+        ax.plot(target_coord[0], target_coord[1], marker='+', ms=10, color='red')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        plot_mask_contours(target_mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+        plot_mask_contours(target_mask_i, ax=ax, verbose=verbose, color='magenta', lw=0.5)
+        
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Image', fontsize=18)
+
+        ax = axs[0, 1]
+        ax.imshow(segm_c, origin='lower', cmap=segm_c.cmap, interpolation='nearest')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        plot_mask_contours(target_mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+        plot_mask_contours(target_mask_i, ax=ax, verbose=verbose, color='magenta', lw=0.5)
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Combined segmentation', fontsize=18)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+        ax = axs[1, 0]
+        ax.imshow(segm_i, origin='lower', cmap=segm_i.cmap, interpolation='nearest')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Inner segmentation', fontsize=18)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+        ax = axs[1, 1]
+        ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Outer segmentation', fontsize=18)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+    detection_results = {
+        'segment_out': segm_o,
+        'segment_in': segm_i,
+        'segment_combine': segm_c,
+        'target_mask_o': target_mask,
+        'target_mask_i': target_mask_i,
+    }
+    return detection_results
+
+
+def select_segment_stars(image, segm, wcs, convolved_image=None, plx_snr=3, 
+                         mask=None, plot=False, norm_kwargs=None):
+    '''
+    Select
+    '''
+    cat = SourceCatalog(image, segm, convolved_data=convolved_image, mask=mask, 
+                        wcs=wcs)
+    tb = cat.to_table()
+    coo = tb['sky_centroid']
+
+    xmTb = Table([tb['label'], tb['xcentroid'], tb['ycentroid'], coo.ra.deg, 
+                  coo.dec.deg, tb['area'], tb['semimajor_sigma'], 
+                  tb['semiminor_sigma'], tb['orientation'], 
+                  tb['eccentricity'], tb['segment_flux']], 
+                 names=['label', 'x', 'y', 'ra', 'dec', 
+                        'area', 'semimajor_sigma', 'semiminor_sigma', 
+                        'orientation', 'eccentricity', 'segment_flux']) 
+    tb_o = xmatch_gaiadr3(xmTb, radius=3, colRA1='ra', colDec1='dec')
+
+    # Select the stars
+    fltr = ~tb_o['Plx'].mask & (tb_o['Plx'] / tb_o['e_Plx'] > plx_snr)
+    tb_s = tb_o[fltr]
+
+    if plot:
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+        
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+        norm = simple_norm(image, **norm_kwargs)
+
+        ax = axs[0]
+        ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+        ax.plot(tb_s['x'], tb_s['y'], ls='none', marker='o', ms=6, 
+                mfc='none', mec='red', mew=0.2)
+        
+        ax = axs[1]
+        ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
+        ax.plot(tb_s['x'], tb_s['y'], ls='none', marker='o', ms=6, 
+                mfc='none', mec='red', mew=0.2)
+    return tb_s
+
+
+def cutout_star(image, segm, coord_pix, extract_size, sigma=1, plot=True):
+    '''
+    Extract the radial profile around the specified coordinate.
+    '''
+    segm = deepcopy(segm)
+    l = segm.data[int(coord_pix[1]), int(coord_pix[0])]
+    #segm.remove_label(l)
+    mask = segm.data > 0
+    
+    img_c = Cutout2D(image, position=coord_pix, size=extract_size)
+    mask_c = Cutout2D(mask, position=coord_pix, size=extract_size)
+    data = img_c.data
+    mask = mask_c.data
+    
+    ny, nx = data.shape
+    yy, xx = np.mgrid[:ny, :nx]
+
+    amp = np.percentile(data, 99)
+    mean_init = extract_size/2
+    g_init = models.Gaussian2D(amplitude=amp, x_mean=mean_init, y_mean=mean_init, x_stddev=sigma, 
+                               y_stddev=sigma)
+    fitter = fitting.LevMarLSQFitter()
+
+    with warnings.catch_warnings():
+        # Ignore model linearity warning from the fitter
+        warnings.filterwarnings('ignore', message='Model is linear in parameters',
+                                category=AstropyUserWarning)
+        g_fit = fitter(g_init, xx, yy, data)
+    
+    x = coord_pix + (g_fit.x_mean.value - mean_init)
+    y = g_fit.y_mean.value
+
+
+    if plot:
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+
+        ax = axs[0]
+        norm = simple_norm(data, 'log', percent=99.0)
+        ax.imshow(data, norm=norm, origin='lower', cmap='viridis')
+        ax.plot(mean_init, mean_init, marker='+', color='C0')
+        ax.plot(g_fit.x_mean, g_fit.y_mean, marker='x', color='C3')
+        
+        ax = axs[1]
+        ax.imshow(mask, origin='lower', cmap='Greys_r')
+
+    return x, y
