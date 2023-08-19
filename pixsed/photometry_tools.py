@@ -30,8 +30,10 @@ from scipy import interpolate
 
 from shapely.geometry import shape
 from .utils import read_coordinate, plot_image, circular_error_estimate
-from .utils import xmatch_gaiadr3, get_image_segmentation, plot_mask_contours
+from .utils import xmatch_gaiadr3, plot_mask_contours
+from .utils import get_image_segmentation, gen_image_mask, detect_source_extended
 from .utils import scale_mask, get_mask_polygons, add_mask_circle, poly_to_xy
+from .utils import select_segment_stars
 from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
 mpl.rc("xtick", direction="in", labelsize=16)
@@ -76,6 +78,7 @@ class Image(object):
         self._pxs = (abs(self._header['CDELT1']) * 3600.)
         self._id = id
         self._data_subbkg = None
+        self._data_convolved = None
         self._image_cleaned_simple = None
         self._image_cleaned = None
         self._psf_oversample = None
@@ -177,28 +180,28 @@ class Image(object):
         '''
         if mask_type == 'quick':
             mask = None
+            data = self._data.flatten()
         elif mask_type == 'segmentation':
             if not hasattr(self, '_mask_segmentation'):
                 raise ValueError(
                     'The background mask (_mask_segmentation) is not generated! Please run mask_segmentation()!')
-            else:
-                mask = self._mask_segmentation
+            mask = self._mask_segmentation
+            data = self._data[~mask]
+
         elif mask_type == 'background':
             if not hasattr(self, '_mask_background'):
                 raise ValueError(
                     'The background mask (_mask_background) is not generated! Please run mask_background()!')
             mask = self._mask_background
+            data = self._data[~mask]
         else:
             raise ValueError(f'The mask_type ({mask_type}) is not recognized!')
 
         if f_sample > 0:
             assert f_sample < 1, f'f_sample ({f_sample}) should be <1!'
-            d = self._data.flatten()
-            samples = np.random.choice(d, size=int(f_sample * len(d)), replace=False)
-        else:
-            samples = self._data.flatten()
+            data = np.random.choice(data, size=int(f_sample * len(data)), replace=False)
 
-        res = sigma_clipped_stats(samples, mask=mask, sigma=sigma, maxiters=maxiters, **kwargs)
+        res = sigma_clipped_stats(data, sigma=sigma, maxiters=maxiters, **kwargs)
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
@@ -563,91 +566,6 @@ class Image(object):
         norm = simple_norm(self._data, stretch='asinh', percent=percentile)
         ax[0].imshow(self._data, norm=norm, cmap='gray', origin='lower')
         ax[1].imshow(self._mask_background, cmap='gray', origin='lower')
-
-    def get_target_mask(self, nstd=0.5, npixels=12, mask=None, connectivity=8, 
-                        kernel_fwhm=3, expand_factor=1, plot=False, norm_kwargs=None):
-        '''
-        Get the mask of the target galaxy.
-        Assuming that there is only one target object on the background.
-        If the coord of the object is None, then the target which has the largest
-        area will be taken into consideration.
-
-        Parameter
-        ----------
-        threshold : float
-            The threshold ot detect source with image segmentation.
-        npixels : int
-            The minimum number of connected pixels, each greater than threshold, 
-            that an object must have to be detected. npixels must be a positive 
-            integer.
-        mask : 2D bool array
-            A boolean mask, with the same shape as the input data, where True 
-            values indicate masked pixels. Masked pixels will not be included in 
-            any source.
-        connectivity : {4, 8} (default: 8)
-            The type of pixel connectivity used in determining how pixels are 
-            grouped into a detected source. The options are 4 or 8 (default). 
-            4-connected pixels touch along their edges. 8-connected pixels touch 
-            along their edges or corners.
-        kernel_fwhm : float (default: 2)
-            The kernel FWHM to smooth the image.
-        expand_factor : float (default: 1)
-            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
-        plot : bool (default: False)
-            Plot the data and segmentation map if True.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-        
-        Notes
-        -----
-        [SGJY added]
-        '''
-        mea, med, std = self.background_properties()
-        img_sub = self._data - med
-        smap, conv_data = get_image_segmentation(img_sub, nstd*std, 
-                                                 kernel_fwhm=kernel_fwhm, 
-                                                 npixels=npixels, 
-                                                 mask=mask, 
-                                                 connectivity=connectivity, 
-                                                 plot=False)
-        
-        cat = SourceCatalog(img_sub, smap, convolved_data=conv_data)
-        sources_tb = cat.to_table()
-
-        if self._coord:
-            label = smap.data[int(self._coord_pix[1]), int(self._coord_pix[0])]
-        else:
-            label = smap.labels[np.argmax(smap.areas)]
-        mask_galaxy = smap == label
-
-        if expand_factor != 1:
-            mask_galaxy = scale_mask(mask_galaxy, factor=expand_factor, connectivity=connectivity)
-        self._mask_galaxy = mask_galaxy
-        self._segment_map = smap
-        self._convolved_data = conv_data
-
-        if plot:
-            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
-            fig.subplots_adjust(wspace=0.05)
-            
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-            norm = simple_norm(img_sub, **norm_kwargs)
-            pList = get_mask_polygons(self._mask_galaxy)
-            xy_poly = poly_to_xy(pList[0])
-
-            ax = axs[0]
-            ax.imshow(img_sub, origin='lower', cmap='Greys_r', norm=norm)
-            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan', label=f'Target mask\nExpand factor: {expand_factor}')
-            ax.set_title('Background subtracted image', fontsize=18)
-            ax.legend(loc='upper left', fontsize=16, labelcolor='cyan', frameon=False)
-
-            ax = axs[1]
-            ax.imshow(smap, origin='lower', cmap=smap.cmap)
-            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan')
-            ax.set_title('Segmentation map', fontsize=18)
-
-            return axs
 
     def mask_galaxy(self, thres=1., iter=10, kernel_size=None):
         '''
@@ -1256,7 +1174,7 @@ class Image(object):
         self._mask_manual = None
 
 
-    def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8, 
+    def gen_mask_background_deprecated(self, threshold, npixels=12, mask=None, connectivity=8, 
                             kernel_fwhm=0, expand_factor=1.2, plot=False, 
                             norm_kwargs=None, interactive=False, verbose=True): 
         '''
@@ -1346,6 +1264,66 @@ class Image(object):
         self._mask_background = mask_e
 
 
+    def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8, 
+                            kernel_fwhm=0, expand_factor=1.2, plot=False, 
+                            fig=None, axs=None, norm_kwargs=None, 
+                            interactive=False, verbose=True): 
+        '''
+        Generate the mask of the background.
+
+        Parameters
+        ----------
+        threshold : float
+            Threshold of image segmentation.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask (optional) : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} optional
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 0)
+            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+        expand_factor : float (default: 1.2)
+            Expand the mask by this factor.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        #_, med, std = sigma_clipped_stats(self._data, mask=mask, sigma=sigma)
+        assert self._bkg_median is not None, 'Please run background_properties() first to get _bkg_median!'
+        assert self._bkg_std is not None, 'Please run background_properties() first to get _bkg_std!'
+
+        img_sub = self._data - self._bkg_median
+        mask, _, _ = gen_image_mask(img_sub, threshold, npixels=npixels, 
+                                    mask=mask, connectivity=connectivity, 
+                                    kernel_fwhm=kernel_fwhm, 
+                                    expand_factor=expand_factor, bounds=None, 
+                                    choose_coord=None, plot=plot, fig=fig, 
+                                    axs=axs, norm_kwargs=norm_kwargs, 
+                                    interactive=interactive, verbose=verbose) 
+        self._mask_background = mask
+
+
     def gen_background_model(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
         """
         Generate the background model.Using median background method.
@@ -1378,7 +1356,7 @@ class Image(object):
         bkg = Background2D(self._data, box_size, mask=mask_background, 
                            filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
-        self._background_model = bkg.background
+        self._background_model = bkg
 
         if plot:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
@@ -1411,7 +1389,7 @@ class Image(object):
         [SGJY added]
         '''
         assert hasattr(self, '_background_model'), 'Please run background_model() first!'
-        self._data_subbkg = self._data - self._background_model
+        self._data_subbkg = self._data - self._background_model.background
         
         if plot:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
@@ -1498,6 +1476,306 @@ class Image(object):
             ax = axs[1]
             ax.imshow(mask_s, origin='lower', cmap='Greys_r')
         return mask_s
+
+    
+    def gen_target_mask_deprecated(self, threshold, npixels=12, mask=None, connectivity=8, 
+                                   kernel_fwhm=3, expand_factor=1, plot=False, norm_kwargs=None):
+        '''
+        Get the mask of the target galaxy.
+        Assuming that there is only one target object on the background.
+        If the coord of the object is None, then the target which has the largest
+        area will be taken into consideration.
+
+        Parameter
+        ----------
+        threshold : float
+            The threshold ot detect source with image segmentation.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 2)
+            The kernel FWHM to smooth the image.
+        expand_factor : float (default: 1)
+            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        
+        Notes
+        -----
+        [SGJY added]
+        '''
+        err_text = 'Lacking the background subtracted data! ' + \
+                   'Run gen_background_model() and background_subtract2() first.'
+        assert hasattr(self, '_data_subbkg'), err_text
+
+        smap, conv_data = get_image_segmentation(self._data_subbkg, threshold, 
+                                                 kernel_fwhm=kernel_fwhm, 
+                                                 npixels=npixels, 
+                                                 mask=mask, 
+                                                 connectivity=connectivity, 
+                                                 plot=False)
+        
+        cat = SourceCatalog(self._data_subbkg, smap, convolved_data=conv_data)
+        sources_tb = cat.to_table()
+
+        if self._coord:
+            label = smap.data[int(self._coord_pix[1]), int(self._coord_pix[0])]
+        else:
+            label = smap.labels[np.argmax(smap.areas)]
+        mask_galaxy = smap == label
+
+        if expand_factor != 1:
+            mask_galaxy = scale_mask(mask_galaxy, factor=expand_factor, connectivity=connectivity)
+        self._mask_galaxy = mask_galaxy
+        self._segment_map = smap
+        self._convolved_data = conv_data
+
+        if plot:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.05)
+            
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+            pList = get_mask_polygons(self._mask_galaxy)
+            xy_poly = poly_to_xy(pList[0])
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan', label=f'Target mask\nExpand factor: {expand_factor}')
+            ax.set_title('Background subtracted image', fontsize=18)
+            ax.legend(loc='upper left', fontsize=16, labelcolor='cyan', frameon=False)
+
+            ax = axs[1]
+            ax.imshow(smap, origin='lower', cmap=smap.cmap)
+            ax.plot(xy_poly[:, 0], xy_poly[:, 1], lw=0.5, color='cyan')
+            ax.set_title('Segmentation map', fontsize=18)
+
+            return axs
+
+
+    def gen_target_mask(self, threshold, npixels=12, mask=None, connectivity=8, 
+                        kernel_fwhm=3, expand_factor=1, bounds:list=None, 
+                        plot=False, fig=None, axs=None, norm_kwargs=None, 
+                        interactive=False, verbose=False):
+        '''
+        Get the mask of the target galaxy.
+        Assuming that there is only one target object on the background.
+        If the coord of the object is None, then the target which has the largest
+        area will be taken into consideration.
+
+        Parameter
+        ----------
+        threshold : float
+            The threshold ot detect source with image segmentation.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        mask : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. Masked pixels will not be included in 
+            any source.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 2)
+            The kernel FWHM to smooth the image.
+        expand_factor : float (default: 1)
+            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+        
+        Notes
+        -----
+        [SGJY added]
+        '''
+        err_text = 'Lacking the background subtracted data! ' + \
+                   'Run gen_background_model() and background_subtract2() first.'
+        assert hasattr(self, '_data_subbkg'), err_text
+
+        mask, smap, cdata = gen_image_mask(self._data_subbkg, threshold, 
+                                           npixels=npixels, mask=mask, 
+                                           connectivity=connectivity, 
+                                           kernel_fwhm=kernel_fwhm, 
+                                           expand_factor=expand_factor, 
+                                           bounds=bounds, 
+                                           choose_coord=self._coord_pix, 
+                                           plot=plot, fig=fig, axs=axs, 
+                                           norm_kwargs=norm_kwargs, 
+                                           interactive=interactive, 
+                                           verbose=verbose)
+
+        self._mask_galaxy = mask
+        self._segment_map = smap
+        self._data_convolved = cdata
+
+    
+    def detect_source_extended(self, threshold_o:float, threshold_i:float, 
+                               npixels_o=5, npixels_i=5, nlevels_o=32, 
+                               nlevel_i=256, contrast_o=0.001, contrast_i=1e-6, 
+                               connectivity=8, kernel_fwhm=0, mode='linear', 
+                               nproc=1, progress_bar=False, plot=False, 
+                               fig=None, axs=None, norm_kwargs=None, 
+                               interactive=False, verbose=False):
+        '''
+        Detect the image sources for the extended target. This function get 
+        the segmentations of the image in two steps, one inside the target_mask 
+        and one outside the target_mask.
+
+        Parameters
+        ----------
+        image : 2D array
+            The image data.
+        target_coord : tuple
+            The pixel coordinate of the target.
+        target_mask (optional) : 2D bool array
+            A boolean mask, with the same shape as the input data, where True 
+            values indicate masked pixels. For extended targets, we generate two 
+            segmentations with different parameters, one inside the target_mask and 
+            one outside the target_mask.
+        threshold_o : float
+            Threshold to generate the segmentation outside target mask.
+        threshold_i : float
+            Threshold to generate the segmentation inside target mask.
+        npixels_o : int (default: 5)
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer. It is for the outer segmentation.
+        npixels_i : int (default: 5)
+            The npixel for the inner segmentation.
+        nlevels_o : int (default: 32)
+            The number of multi-thresholding levels to use for deblending. Each 
+            source will be re-thresholded at nlevels levels spaced between its 
+            minimum and maximum values (non-inclusive). The mode keyword determines 
+            how the levels are spaced. It is for the outer segmentation.
+        nlevels_i : int (default: 32)
+            The nlevel for the inner segmentation.
+        contrast_o : float (default: 0.001)
+            The fraction of the total source flux that a local peak must have (at 
+            any one of the multi-thresholds) to be deblended as a separate object. 
+            contrast must be between 0 and 1, inclusive. If contrast=0 then every 
+            local peak will be made a separate object (maximum deblending). 
+            If contrast=1 then no deblending will occur. The default is 0.001, which 
+            will deblend sources with a 7.5 magnitude difference. It is for the 
+            outer segmentation.
+        contrast_i : float (default: 1e-6)
+            The contrast for the inner segmentation.
+        connectivity : {4, 8} optional
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 0)
+            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+        mode : {'exponential', 'linear', 'sinh'}, optional
+            The mode used in defining the spacing between the multi-thresholding 
+            levels (see the nlevels keyword) during deblending. The 'exponential' 
+            and 'sinh' modes have more threshold levels near the source minimum and 
+            less near the source maximum. The 'linear' mode evenly spaces 
+            the threshold levels between the source minimum and maximum. 
+            The 'exponential' and 'sinh' modes differ in that the 'exponential' 
+            levels are dependent on the source maximum/minimum ratio (smaller ratios 
+            are more linear; larger ratios are more exponential), while the 'sinh' 
+            levels are not. Also, the 'exponential' mode will be changed to 'linear' 
+            for sources with non-positive minimum data values.
+        nproc : int (default: 1)
+            The number of processes to use for multiprocessing (if larger than 1). 
+            If set to 1, then a serial implementation is used instead of a parallel 
+            one. If None, then the number of processes will be set to the number of 
+            CPUs detected on the machine. Please note that due to overheads, 
+            multiprocessing may be slower than serial processing. This is especially 
+            true if one only has a small number of sources to deblend. The benefits 
+            of multiprocessing require ~1000 or more sources to deblend, with larger 
+            gains as the number of sources increase.
+        progress_bar : bool (default: False)
+            Show the progress bar in various steps.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        assert hasattr(self, '_data_convolved'), 'The convolved data is lacking!'
+        assert hasattr(self, '_mask_galaxy'), 'The target mask is lacking!'
+
+        res = detect_source_extended(self._data_convolved, self._coord_pix, 
+                                     self._mask_galaxy, threshold_o=threshold_o, 
+                                     threshold_i=threshold_i, 
+                                     npixels_o=npixels_o, 
+                                     npixels_i=npixels_i, nlevels_o=nlevels_o, 
+                                     nlevel_i=nlevel_i, contrast_o=contrast_o, 
+                                     contrast_i=contrast_i, 
+                                     connectivity=connectivity, 
+                                     kernel_fwhm=kernel_fwhm, mode=mode, 
+                                     nproc=nproc, progress_bar=progress_bar, 
+                                     plot=plot, fig=fig, axs=axs, 
+                                     norm_kwargs=norm_kwargs, 
+                                     interactive=interactive, verbose=verbose)
+        self._segment_results = res
+
+    
+    def gen_PSF_model(self, extract_size=25, plx_snr=3, threshold_flux=None, 
+                      threhold_eccentricity=0.1, mask=None, plot=False, 
+                      norm_kwargs=None):
+        '''
+        Generate the source table in the field.
+        '''
+        assert hasattr(self, '_data_convolved'), 'The _data_convolved is lacking!'
+        assert hasattr(self, '_segment_results'), 'The _segment_results is lacking!'
+        assert hasattr(self, '_wcs'), 'The _wcs is lacking!'
+
+        segm_o = self._segment_results['segment_out']
+        tb = select_segment_stars(self._data, segm_o, self._wcs, 
+                                  convolved_image=self._data_convolved,
+                                  plx_snr=plx_snr, mask=mask, plot=False)
+
+        tb.sort('segment_flux', reverse=True)
+
+        fltr = tb['eccentricity'] < threhold_eccentricity
+
+        if threshold_flux is not None:
+            fltr |= tb['segment_flux'] < threshold_flux
+        
+        tb_sel = tb[fltr]
+
+        return tb, tb_sel
+
 
 
 class Atlas(object):
