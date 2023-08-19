@@ -940,7 +940,11 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
 def select_segment_stars(image, segm, wcs, convolved_image=None, plx_snr=3, 
                          mask=None, plot=False, norm_kwargs=None):
     '''
-    Select
+    Select the stars corresponding to the segments.
+
+    Notes
+    -----
+    FIXME: Finishe the doc!
     '''
     cat = SourceCatalog(image, segm, convolved_data=convolved_image, mask=mask, 
                         wcs=wcs)
@@ -982,10 +986,17 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, plx_snr=3,
 def cutout_star(image, segm, coord_pix, extract_size, sigma=1, plot=True):
     '''
     Extract the radial profile around the specified coordinate.
+
+    Parameters
+    ----------
+    image : 
+
+    Notes
+    -----
+    FIXME: Finishe the doc!
     '''
     segm = deepcopy(segm)
     l = segm.data[int(coord_pix[1]), int(coord_pix[0])]
-    #segm.remove_label(l)
     mask = segm.data > 0
     
     img_c = Cutout2D(image, position=coord_pix, size=extract_size)
@@ -1025,3 +1036,5 @@ def cutout_star(image, segm, coord_pix, extract_size, sigma=1, plot=True):
         ax.imshow(mask, origin='lower', cmap='Greys_r')
 
     return x, y
+
+
