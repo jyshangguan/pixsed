@@ -88,7 +88,6 @@ class Image(object):
         self._mask_stars = None
         self._mask_galaxy = None
         self._mask_manual = None       # [SGJY added]
-        self._mask_contaminant = None  # [SGJY added]
         self._background_model = None
         self._image_cleaned_background = None
         self._sources_overlap = None
@@ -1325,7 +1324,7 @@ class Image(object):
         self._mask_background = mask
 
 
-    def gen_background_model(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
+    def gen_model_background(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
         """
         Generate the background model.Using median background method.
         Parameter
@@ -1357,7 +1356,7 @@ class Image(object):
         bkg = Background2D(self._data, box_size, mask=mask_background, 
                            filter_size=(filter_size, filter_size),
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
-        self._background_model = bkg
+        self._model_background = bkg
 
         if plot:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
@@ -1371,7 +1370,7 @@ class Image(object):
             ax.set_title('Data', fontsize=16)
             
             ax = axs[1]
-            ax.imshow(self._background_model, cmap='Greys_r', origin='lower', norm=norm)
+            ax.imshow(self._model_background, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Background model', fontsize=16)
 
 
@@ -1390,7 +1389,7 @@ class Image(object):
         [SGJY added]
         '''
         assert hasattr(self, '_background_model'), 'Please run background_model() first!'
-        self._data_subbkg = self._data - self._background_model.background
+        self._data_subbkg = self._data - self._model_background.background
         
         if plot:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
@@ -1518,7 +1517,7 @@ class Image(object):
         [SGJY added]
         '''
         err_text = 'Lacking the background subtracted data! ' + \
-                   'Run gen_background_model() and background_subtract2() first.'
+                   'Run gen_model_background() and background_subtract2() first.'
         assert hasattr(self, '_data_subbkg'), err_text
 
         smap, conv_data = get_image_segmentation(self._data_subbkg, threshold, 
@@ -2014,16 +2013,26 @@ class Image(object):
             The threshold for DAOFinder.
         xmatch_radius: float
             The xmatch radius. arcsec.
-        threshold_gmag: float
-            The max G band magnitude of the stars which will be picked out.
-        threshold_pss (optional): float
-            The threshold to select stars according to Gaia probability of single star.
         threshold_plx (optional): float
             The threshold to select stars according to Gaia parallax SNR.
+        threshold_gmag: float
+            The max G band magnitude of the stars which will be picked out.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         
-        Return
-        ---------
-        A table contains Ra, Dec, and Gmag.
+        Notes
+        -----
+        [SGJY added]
         '''
         assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
         assert hasattr(self, '_segment_results'), 'Please run detect_source_extended() first!'
@@ -2109,6 +2118,244 @@ class Image(object):
             ax.set_xlim(xlim); ax.set_ylim(ylim)
             ax.set_title('Overlap mask', fontsize=18)
 
+
+    def gen_mask_surround(self, expand_factor=1.2, plot=False, fig=None, 
+                          axs=None, norm_kwargs=None, interactive=False, 
+                          verbose=False):
+        '''
+        Generate the mask of the sources surrounding the target. It takes 
+        the segments outside the inner mask of the target.
+
+        Parameters
+        ----------
+        expand_factor : float (default: 1)
+            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        assert hasattr(self, '_segment_results'), 'Please run detect_source_extended() first!'
+
+        segm = self._segment_results['segment_combine']
+        mask = segm.data > 0
+
+        if expand_factor != 1:
+            mask = scale_mask(mask, factor=expand_factor)
+        
+        self._mask_surround = mask
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(segm, origin='lower', cmap=segm.cmap)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Surrounding segments', fontsize=18)
+
+
+    def gen_mask_contaminant(self, plot=False, fig=None, axs=None, 
+                             norm_kwargs=None, interactive=False, 
+                             verbose=False): 
+        '''
+        Generate the mask of all contaminants.
+
+        Parameters
+        ----------
+        radius_point : float (default: 20)
+            The radius of the point source mask for Gaia stars.
+            The value should be guided by the PSF model.
+        plot : bool (default: False)
+            Plot the results if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        assert hasattr(self, '_mask_overlap'), 'Please run gen_mask_overlap() first!'
+        assert hasattr(self, '_mask_surround'), 'Please run gen_mask_surround() first!'
+
+        self._mask_contaminant = self._mask_overlap | self._mask_surround
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(self._mask_contaminant, origin='lower', cmap='Greys_r')
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Surrounding segments', fontsize=18)
+
+
+    def gen_model_galaxy(self, box_size=None, filter_size=1, plot=False, 
+                         fig=None, axs=None, norm_kwargs=None, 
+                         interactive=False, verbose=False):
+        '''
+        Generate the galaxy model with Photutils Background2D.
+        '''
+        assert hasattr(self, '_mask_contaminant'), 'Please run gen_mask_contaminant() first!'
+
+        ny, nx = self._data_subbkg.shape
+
+        if not box_size:
+            # 1 times the PSF enclosed size
+            bsize = int(self._psf_enclose_radius*2)
+            box_size = (bsize, bsize)
+
+        sigma_clip = SigmaClip(sigma=3.)
+        bkg_estimator = MedianBackground()
+        model = Background2D(self._data_subbkg, box_size, mask=self._mask_contaminant, 
+                           filter_size=(filter_size, filter_size),
+                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+        self._galaxy_model_data = model.background
+        self._galaxy_model_rms = model.background_rms
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(self._galaxy_model_data, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Galaxy model', fontsize=18)
+
+
+    def gen_image_clean(self, plot=False, fig=None, axs=None, norm_kwargs=None, 
+                         interactive=False, verbose=False):
+        '''
+        Replace the masked region with the galaxy model.
+        '''
+        self._image_clean = self._data_subbkg.copy()
+        self._image_clean[self._mask_contaminant] = self._galaxy_model_data[self._mask_contaminant] + \
+                                                    self._galaxy_model_rms[self._mask_contaminant] * \
+                                                    np.random.randn(np.sum(self._mask_contaminant))
+        
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(self._image_clean, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Cleaned image', fontsize=18)
 
 
 class Atlas(object):
