@@ -154,7 +154,7 @@ class Image(object):
         ax[0].imshow(self._data, cmap='gray', norm=norm, origin='lower')
         ax[1].imshow(self._background_model, cmap='gray', origin='lower')
 
-    def background_properties(self, mask_type='quick', sigma=3, maxiters=5, f_sample=-1, **kwargs):
+    def background_properties(self, mask_type='quick', sigma=3, maxiters=5, f_sample=1, **kwargs):
         '''
         Calculate the mean, median, and std of the background using sigma clip.
 
@@ -171,6 +171,8 @@ class Image(object):
             Sigma clip threshold.
         maxiters : int (default: 5)
             Maximum iterations of the sigma clip.
+        f_sample : float (default: -1)
+            Use a fraction of the unmasked data to calculate the sigma clip
         **kwargs : Other parameters of sigma_clipped_stats()
 
         Returns
@@ -197,8 +199,8 @@ class Image(object):
         else:
             raise ValueError(f'The mask_type ({mask_type}) is not recognized!')
 
-        if f_sample > 0:
-            assert f_sample < 1, f'f_sample ({f_sample}) should be <1!'
+        if f_sample < 1:
+            assert f_sample > 0, f'f_sample ({f_sample}) should be 0 to 1!'
             data = np.random.choice(data, size=int(f_sample * len(data)), replace=False)
 
         res = sigma_clipped_stats(data, sigma=sigma, maxiters=maxiters, **kwargs)
@@ -1265,7 +1267,9 @@ class Image(object):
 
 
     def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8, 
-                            kernel_fwhm=0, expand_factor=1.2, plot=False, 
+                            kernel_fwhm=0, deblend=False, nlevels=32, 
+                            contrast=0.001, mode='linear', nproc=1, 
+                            progress_bar=False, expand_factor=1.2, plot=False, 
                             fig=None, axs=None, norm_kwargs=None, 
                             interactive=False, verbose=True): 
         '''
@@ -1314,14 +1318,18 @@ class Image(object):
         assert self._bkg_std is not None, 'Please run background_properties() first to get _bkg_std!'
 
         img_sub = self._data - self._bkg_median
-        mask, _, _ = gen_image_mask(img_sub, threshold, npixels=npixels, 
-                                    mask=mask, connectivity=connectivity, 
-                                    kernel_fwhm=kernel_fwhm, 
-                                    expand_factor=expand_factor, bounds=None, 
-                                    choose_coord=None, plot=plot, fig=fig, 
-                                    axs=axs, norm_kwargs=norm_kwargs, 
-                                    interactive=interactive, verbose=verbose) 
+        mask, segm, _ = gen_image_mask(img_sub, threshold, npixels=npixels, 
+                                       mask=mask, connectivity=connectivity, 
+                                       kernel_fwhm=kernel_fwhm, deblend=deblend, 
+                                       nlevels=nlevels, contrast=contrast, 
+                                       mode=mode, nproc=nproc, 
+                                       progress_bar=progress_bar, 
+                                       expand_factor=expand_factor, bounds=None, 
+                                       choose_coord=None, plot=plot, fig=fig, 
+                                       axs=axs, norm_kwargs=norm_kwargs, 
+                                       interactive=interactive, verbose=verbose) 
         self._mask_background = mask
+        self._segm_background = segm
 
 
     def gen_model_background(self, box_size=None, filter_size=5, plot=False, norm_kwargs=None):
@@ -1370,7 +1378,7 @@ class Image(object):
             ax.set_title('Data', fontsize=16)
             
             ax = axs[1]
-            ax.imshow(self._model_background, cmap='Greys_r', origin='lower', norm=norm)
+            ax.imshow(self._model_background.background, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Background model', fontsize=16)
 
 
@@ -1414,7 +1422,14 @@ class Image(object):
 
         Parameters
         ----------
-
+        image : 2D array
+            The image data.
+        factor : int
+            The factor to rebin the image.
+        plot : bool (default: False)
+                Plot the data and segmentation map if True.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
         '''
         rebin_wcs = deepcopy(self._wcs)
         rebin_wcs.wcs.crpix = self._wcs.wcs.crpix / factor
@@ -1750,12 +1765,13 @@ class Image(object):
         self._segment_results = res
 
     
-    def gen_PSF_model(self, extract_size=25, plx_snr=3, threshold_flux=None, 
-                      threshold_eccentricity=0.15, num_lim=54, mask=None, 
-                      oversampling=4, smoothing_kernel='quadratic', maxiters=3, 
+    def gen_PSF_model(self, extract_size=25, xmatch_radius=3, plx_snr=3, 
+                      threshold_flux=None, threshold_eccentricity=0.15, 
+                      num_lim=54, mask=None, oversampling=4, 
+                      smoothing_kernel='quadratic', maxiters=3, 
                       progress_bar=True, skip_psf_model=False, plot=False, 
                       fig=None, axs1=None, axs2=None, norm_kwargs=None, nrows=6, 
-                      ncols=9):
+                      ncols=9, verbose=False):
         '''
         Select the good stars and generate the PSF model.
 
@@ -1776,16 +1792,23 @@ class Image(object):
         segm_o = self._segment_results['segment_out']
         tb = select_segment_stars(self._data, segm_o, self._wcs, 
                                   convolved_image=self._data_convolved,
-                                  plx_snr=plx_snr, mask=mask, plot=False)
+                                  mask=mask, xmatch_radius=xmatch_radius, 
+                                  plx_snr=plx_snr, plot=False)
 
         tb.sort('segment_flux', reverse=True)
 
-        fltr = tb['eccentricity'] < threshold_eccentricity
+        if verbose:
+            print(f'Found {len(tb)} stars')
 
+        fltr = tb['eccentricity'] < threshold_eccentricity
+        
         if threshold_flux is not None:
             fltr &= tb['segment_flux'] < threshold_flux
         
         tb_sel = tb[fltr]
+        
+        if verbose:
+            print(f'Selected {len(tb_sel)}/{len(tb)} stars')
         
         # Cut the number of the star table
         if len(tb_sel) > num_lim:
@@ -1927,6 +1950,12 @@ class Image(object):
     def get_PSF_profile(self, enclosed_energy=0.99, plot=False, axs=None):
         '''
         Get the PSF profile and FWHM of the PSF.
+
+        Parameters
+        ----------
+        enclosed_energy : float (0-1; default: 0.99)
+            The enclosed energy to define the radius of the entire PSF.
+        plot : 
         '''
         from photutils.centroids import centroid_quadratic
 
@@ -2018,7 +2047,7 @@ class Image(object):
         threshold_gmag: float
             The max G band magnitude of the stars which will be picked out.
         plot : bool (default: False)
-            Plot the data and segmentation map if True.
+            Plot the image and mask if True.
         fig : Matplotlib Figure
             The figure to plot.
         axs : Matplotlib Axes
@@ -2057,7 +2086,9 @@ class Image(object):
             fltr = dist > center_radius
 
             plx_snr = (t_o['Plx'] / t_o['e_Plx']) 
-            fltr &= (plx_snr > threshold_plx) & ~t_o['Plx'].mask
+            fltr &= (plx_snr > threshold_plx) 
+            if hasattr(t_o['Plx'], 'mask'):
+                fltr &= ~t_o['Plx'].mask
             
             if threshold_gmag is not None:
                 fltr &= (t_o['Gmag'] < threshold_gmag)
@@ -2150,10 +2181,11 @@ class Image(object):
         assert hasattr(self, '_segment_results'), 'Please run detect_source_extended() first!'
 
         segm = self._segment_results['segment_combine']
-        mask = segm.data > 0
 
         if expand_factor != 1:
-            mask = scale_mask(mask, factor=expand_factor)
+            mask = scale_mask(segm.data, factor=expand_factor)
+        else:
+            mask = segm.data > 0
         
         self._mask_surround = mask
 
@@ -2202,13 +2234,18 @@ class Image(object):
 
         Parameters
         ----------
-        radius_point : float (default: 20)
-            The radius of the point source mask for Gaia stars.
-            The value should be guided by the PSF model.
         plot : bool (default: False)
-            Plot the results if True.
+            Plot the image and mask if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
         norm_kwargs (optional) : dict
             The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
 
         Notes
         -----
@@ -2260,6 +2297,31 @@ class Image(object):
                          interactive=False, verbose=False):
         '''
         Generate the galaxy model with Photutils Background2D.
+
+        Parameters
+        ----------
+        box_size : int or array_like (int)
+            The box size along each axis. If box_size is a scalar then a square 
+            box of size box_size will be used. If box_size has two elements, 
+            they must be in (ny, nx) order.
+        filter_size : int or array_like (int), optional
+            The window size of the 2D median filter to apply to 
+            the low-resolution background map. If filter_size is a scalar then a 
+            square box of size filter_size will be used. If filter_size has two 
+            elements, they must be in (ny, nx) order. filter_size must be odd 
+            along both axes. A filter size of 1 (or (1, 1)) means no filtering.
+        plot : bool (default: False)
+            Plot the image and galaxy model if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         '''
         assert hasattr(self, '_mask_contaminant'), 'Please run gen_mask_contaminant() first!'
 
@@ -2317,6 +2379,21 @@ class Image(object):
                          interactive=False, verbose=False):
         '''
         Replace the masked region with the galaxy model.
+
+        Parameters
+        ----------
+        plot : bool (default: False)
+            Plot the image and cleaned image if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         '''
         self._image_clean = self._data_subbkg.copy()
         self._image_clean[self._mask_contaminant] = self._galaxy_model_data[self._mask_contaminant] + \
