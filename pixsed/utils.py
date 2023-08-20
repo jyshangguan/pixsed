@@ -16,13 +16,14 @@ from astropy.table import Table
 from astropy.modeling import models, fitting
 from astropy.nddata import Cutout2D
 from astropy.utils.exceptions import AstropyUserWarning
+from scipy.ndimage import gaussian_filter
 
 from photutils.segmentation import make_2dgaussian_kernel, detect_sources, deblend_sources
 from photutils.segmentation import SourceFinder, SegmentationImage, SourceCatalog
 from rasterio.features import rasterize, shapes
 from shapely.geometry import shape, MultiPoint
 from shapely.affinity import scale
-from scipy.ndimage import gaussian_filter
+from reproject import reproject_interp
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -182,7 +183,7 @@ def get_mask_polygons(mask, connectivity=8):
     vals = polygons[:, 1]
     
     # Collect the polygons that are associated with the mask.
-    pList = polygons[vals == 1, 0]
+    pList = polygons[vals > 0, 0]
     return pList
 
 
@@ -193,7 +194,7 @@ def scale_mask(mask, factor, connectivity=8):
     Parameters
     ----------
     mask : 2D array
-        The mask with masked in region True or 1.
+        The mask or segments. The masked region have True or >=1 values.
     factor : float
         The scaling factor of the mask
     connectivity : {4, 8} (default: 8)
@@ -462,7 +463,7 @@ def polys_to_mask(polys, mask_shape):
 
 def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8, 
                    kernel_fwhm=0, deblend=False, nlevels=32, contrast=0.001, 
-                   mode='linear', nproc=1, progress_bar=True, expand_factor=1.2, 
+                   mode='linear', nproc=1, progress_bar=False, expand_factor=1.2, 
                    bounds:list=None, choose_coord=None, plot=False, fig=None, 
                    axs=None, norm_kwargs=None, interactive=False, verbose=True): 
     '''
@@ -532,7 +533,7 @@ def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8,
                                          plot=False)
 
     if choose_coord is None:
-        mask = smap.data > 0
+        mask = smap.data
     
     else:
         x, y = choose_coord
@@ -663,7 +664,7 @@ def segment_add(segm, mask, plot=False):
     Parameters
     ----------
     segm : SegmentationImage 
-        The inpug SegmentationImage.
+        The input SegmentationImage.
     mask : 2D array
         Mask of the region to be added.
     plot : bool (default: False)
@@ -858,6 +859,7 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
                                nlevels=nlevel_i, contrast=contrast_i, mode=mode, 
                                connectivity=connectivity, relabel=True, 
                                nproc=nproc, progress_bar=progress_bar)
+
     # Get the mask of the galaxy innter region
     x_t, y_t = target_coord
     target_mask_i = segm_i0.data == segm_i0.data[int(y_t), int(x_t)]
@@ -920,12 +922,16 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
         ax.set_yticklabels([])
 
         ax = axs[1, 1]
-        ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
-        xlim = ax.get_xlim(); ylim = ax.get_ylim()
-        ax.set_xlim(xlim); ax.set_ylim(ylim)
-        ax.set_title('Outer segmentation', fontsize=18)
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
+
+        if segm_o is None:
+            ax.axis('off')
+        else:
+            ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Outer segmentation', fontsize=18)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
 
     detection_results = {
         'segment_out': segm_o,
@@ -937,14 +943,39 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
     return detection_results
 
 
-def select_segment_stars(image, segm, wcs, convolved_image=None, plx_snr=3, 
-                         mask=None, plot=False, norm_kwargs=None):
+def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None, 
+                         xmatch_radius=3, plx_snr=3, plot=False, 
+                         norm_kwargs=None):
     '''
     Select the stars corresponding to the segments.
 
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    segm : SegmentationImage 
+        The input SegmentationImage.
+    wcs : WCS
+        The WCS of the image to get the on-sky coordinates of the sources.
+    convolved_image (optional) : 2D array
+        The 2D array used to calculate the source centroid and morphological 
+        properties.
+    mask : 2D array
+        A boolean mask with the same shape as data where a True value indicates 
+        the corresponding element of data is masked. Masked data are excluded 
+        from all calculations.
+    xmatch_radius : float (default: 3)
+        The cross-matching radius, units: arcsec.
+    plx_snr : float
+        The SNR of the parallax to select stars.
+    plot : bool (default: False)
+        Plot the data and segmentation map if True.
+    norm_kwargs (optional) : dict
+        The keywords to normalize the data image.
+
     Notes
     -----
-    FIXME: Finishe the doc!
+    [SGJY added]
     '''
     cat = SourceCatalog(image, segm, convolved_data=convolved_image, mask=mask, 
                         wcs=wcs)
@@ -958,7 +989,7 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, plx_snr=3,
                  names=['label', 'x', 'y', 'ra', 'dec', 
                         'area', 'semimajor_sigma', 'semiminor_sigma', 
                         'orientation', 'eccentricity', 'segment_flux']) 
-    tb_o = xmatch_gaiadr3(xmTb, radius=3, colRA1='ra', colDec1='dec')
+    tb_o = xmatch_gaiadr3(xmTb, radius=xmatch_radius, colRA1='ra', colDec1='dec')
 
     # Select the stars
     fltr = ~tb_o['Plx'].mask & (tb_o['Plx'] / tb_o['e_Plx'] > plx_snr)
@@ -989,7 +1020,19 @@ def cutout_star(image, segm, coord_pix, extract_size, sigma=1, plot=True):
 
     Parameters
     ----------
-    image : 
+    image : 2D array
+        The image data.
+    segm : SegmentationImage 
+        The input SegmentationImage.
+    coord_pix : tuple
+        Coordinate of the target star, units: pixel.
+    extract_size : int
+        Size of the box to extract the star, units: pixel.
+    sigma : float (default: 1)
+        The sigma of the Gaussian fit to measure the center of the star, 
+        units: pixel. 
+    plot : bool (default: False)
+        Plot the results if True.
 
     Notes
     -----
@@ -1038,3 +1081,44 @@ def cutout_star(image, segm, coord_pix, extract_size, sigma=1, plot=True):
     return x, y
 
 
+def rebin_image(image, factor=10, plot=False, norm_kwargs=None):
+    '''
+    Rebin image to reduce the image size.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    factor : int
+        The factor to rebin the image.
+    plot : bool (default: False)
+            Plot the data and segmentation map if True.
+    norm_kwargs (optional) : dict
+        The keywords to normalize the data image.
+    '''
+    ny, nx = image.shape
+    input_wcs = WCS(naxis=2)
+    output_wcs = WCS(naxis=2)
+
+    input_wcs.wcs.crpix = ny // 2, nx // 2
+    input_wcs.wcs.cdelt = -1, 1
+    output_wcs.wcs.crpix = input_wcs.wcs.crpix / factor
+    output_wcs.wcs.cdelt = input_wcs.wcs.cdelt * factor
+
+    shape_out = (ny // factor, nx // factor)
+    image_rb, _ = reproject_interp((image, input_wcs), output_wcs, shape_out=shape_out)
+
+    if plot:
+        fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            
+        ax = axs[0]
+        norm = simple_norm(image, **norm_kwargs)
+        ax.imshow(image, origin='lower', norm=norm, cmap='Greys_r')
+            
+        ax = axs[1]
+        ax.imshow(image_rb, origin='lower', norm=norm, cmap='Greys_r')
+
+    return image_rb
