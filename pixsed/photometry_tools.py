@@ -2094,6 +2094,7 @@ class Image(object):
                 fltr &= (t_o['Gmag'] < threshold_gmag)
 
             t_s = t_o[fltr]
+            self._table_overlap_stars = t_s
 
             if mask_radius is None:
                 mask_radius = self._psf_enclose_radius
@@ -2213,13 +2214,12 @@ class Image(object):
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
             xlim = ax.get_xlim(); ylim = ax.get_ylim()
-
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
             ax.set_xlim(xlim); ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
-            ax.imshow(segm, origin='lower', cmap=segm.cmap)
+            ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
             xlim = ax.get_xlim(); ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
             ax.set_xlim(xlim); ax.set_ylim(ylim)
@@ -2290,6 +2290,140 @@ class Image(object):
             xlim = ax.get_xlim(); ylim = ax.get_ylim()
             ax.set_xlim(xlim); ax.set_ylim(ylim)
             ax.set_title('Surrounding segments', fontsize=18)
+
+
+    def add_mask_bright_stars(self, threshold, expand_factor=1, 
+                              threshold_gmag=None, npixels=12, connectivity=8, 
+                              kernel_fwhm=0, deblend=True, contrast=1e-6, 
+                              nlevels=256, plot=False, fig=None, axs=None, 
+                              norm_kwargs=None, interactive=False, 
+                              verbose=False):
+        '''
+        Add mask of bright stars that are overlapping with the target galaxy.
+
+        Parameters
+        ----------
+        threshold : float
+            The threshold ot detect source with image segmentation.
+        expand_factor : float (default: 1)
+            The kernel FWHM to smooth the galaxy mask if expand_factor>1.
+        threshold_gmag (optoinal) : float
+            The threshold to select bright stars.
+        npixels : int
+            The minimum number of connected pixels, each greater than threshold, 
+            that an object must have to be detected. npixels must be a positive 
+            integer.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are 
+            grouped into a detected source. The options are 4 or 8 (default). 
+            4-connected pixels touch along their edges. 8-connected pixels touch 
+            along their edges or corners.
+        kernel_fwhm : float (default: 2)
+            The kernel FWHM to smooth the image.
+        deblend : bool (default: True)
+            Deblend the segmentation if True.
+        contrast : float (default: 1e-6)
+            The fraction of the total source flux that a local peak must have (at 
+            any one of the multi-thresholds) to be deblended as a separate object. 
+            contrast must be between 0 and 1, inclusive. If contrast=0 then every 
+            local peak will be made a separate object (maximum deblending). 
+            If contrast=1 then no deblending will occur. The default is 0.001, which 
+            will deblend sources with a 15 magnitude difference.
+        nlevels : int (default: 32)
+            The number of multi-thresholding levels to use for deblending. Each 
+            source will be re-thresholded at nlevels levels spaced between its 
+            minimum and maximum values (non-inclusive). The mode keyword determines 
+            how the levels are spaced.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+        '''
+        image = self._data_subbkg - self._galaxy_model_data
+        segm, _ = get_image_segmentation(image, threshold, npixels=npixels, 
+                                         mask=~self._mask_galaxy, 
+                                         connectivity=connectivity, 
+                                         kernel_fwhm=kernel_fwhm,
+                                         deblend=deblend, contrast=contrast, 
+                                         nlevels=nlevels, plot=False)
+        
+        mask = np.zeros_like(image)
+        tb = self._table_overlap_stars
+
+        if threshold_gmag is not None:
+            tb = tb[tb['Gmag'] < threshold_gmag]
+
+        for x, y in zip(tb['x'], tb['y']):
+            l = segm.data[int(y), int(x)]
+            mask[segm.data == l] = l
+        
+        if expand_factor != 1:
+            mask = scale_mask(mask, factor=expand_factor)
+        else:
+            mask = mask > 0
+
+        self._mask_overlap |= mask
+        
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05, hspace=0.08)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+        
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(self._data_subbkg, **norm_kwargs)
+
+            ax = axs[0, 0]
+            ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[0, 1]
+            ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            ax.plot(tb['x'], tb['y'], marker='+', color='r', ls='none')
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Galaxy removed image', fontsize=18)
+
+            ax = axs[1, 0]
+            ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Surrounding segments', fontsize=18)
+            
+            ax = axs[1, 1]
+            ax.imshow(self._mask_overlap, origin='lower', cmap='Greys_r')
+            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+
+            plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_title('Mask for overlapped stars', fontsize=18)
 
 
     def gen_model_galaxy(self, box_size=None, filter_size=1, plot=False, 
