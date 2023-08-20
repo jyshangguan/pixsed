@@ -183,6 +183,7 @@ class Image(object):
         if mask_type == 'quick':
             mask = None
             data = self._data.flatten()
+
         elif mask_type == 'segmentation':
             if not hasattr(self, '_mask_segmentation'):
                 raise ValueError(
@@ -196,6 +197,16 @@ class Image(object):
                     'The background mask (_mask_background) is not generated! Please run mask_background()!')
             mask = self._mask_background
             data = self._data[~mask]
+
+        elif mask_type == 'subbkg':
+            if not hasattr(self, '_mask_background'):
+                raise ValueError(
+                    'The background mask (_mask_background) is not generated! Please run mask_background()!')
+            if not hasattr(self, '_data_subbkg'):
+                raise ValueError(
+                    'The background-subtracted data (_data_subbkg) is not generated! Please run background_subtract2()!')
+            data = self._data_subbkg[~self._mask_background]
+
         else:
             raise ValueError(f'The mask_type ({mask_type}) is not recognized!')
 
@@ -1769,7 +1780,7 @@ class Image(object):
                       threshold_flux=None, threshold_eccentricity=0.15, 
                       num_lim=54, mask=None, oversampling=4, 
                       smoothing_kernel='quadratic', maxiters=3, 
-                      progress_bar=True, skip_psf_model=False, plot=False, 
+                      progress_bar=False, skip_psf_model=False, plot=False, 
                       fig=None, axs1=None, axs2=None, norm_kwargs=None, nrows=6, 
                       ncols=9, verbose=False):
         '''
@@ -2292,12 +2303,12 @@ class Image(object):
             ax.set_title('Surrounding segments', fontsize=18)
 
 
-    def add_mask_bright_stars(self, threshold, expand_factor=1, 
-                              threshold_gmag=None, npixels=12, connectivity=8, 
-                              kernel_fwhm=0, deblend=True, contrast=1e-6, 
-                              nlevels=256, plot=False, fig=None, axs=None, 
-                              norm_kwargs=None, interactive=False, 
-                              verbose=False):
+    def update_mask_overlap(self, threshold, expand_factor=1, 
+                            threshold_gmag=None, npixels=12, connectivity=8, 
+                            kernel_fwhm=0, deblend=True, contrast=1e-6, 
+                            nlevels=256, plot=False, fig=None, axs=None, 
+                            norm_kwargs=None, interactive=False, 
+                            verbose=False):
         '''
         Add mask of bright stars that are overlapping with the target galaxy.
 
@@ -2347,9 +2358,15 @@ class Image(object):
         verbose : bool (default: True)
             Show details if True.
         '''
+        assert hasattr(self, '_data_subbkg')
+        assert hasattr(self, '_galaxy_model_data')
+        assert hasattr(self, '_segment_results')
+
         image = self._data_subbkg - self._galaxy_model_data
+        target_mask_i = self._segment_results['target_mask_i']
+
         segm, _ = get_image_segmentation(image, threshold, npixels=npixels, 
-                                         mask=~self._mask_galaxy, 
+                                         mask=~target_mask_i, 
                                          connectivity=connectivity, 
                                          kernel_fwhm=kernel_fwhm,
                                          deblend=deblend, contrast=contrast, 
@@ -2370,7 +2387,7 @@ class Image(object):
         else:
             mask = mask > 0
 
-        self._mask_overlap |= mask
+        self._mask_overlap = mask
         
         if plot:
             if interactive:
@@ -2397,6 +2414,7 @@ class Image(object):
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
             xlim = ax.get_xlim(); ylim = ax.get_ylim()
 
+            plot_mask_contours(target_mask_i, ax=ax, verbose=verbose, color='magenta', lw=0.5)
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
             ax.set_xlim(xlim); ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
