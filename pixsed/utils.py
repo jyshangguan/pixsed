@@ -408,7 +408,7 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
     return segment_map, convolved_data
 
 
-def add_mask_circle(mask, x, y, radius):
+def add_mask_circle(mask, x, y, radius, value=1):
     '''
     Add a circular mask in the input mask array.
     
@@ -420,6 +420,8 @@ def add_mask_circle(mask, x, y, radius):
         The pixel coordinate in the mask.
     radius : float
         The radius of the added mask.
+    value : int or float
+        The value put in the mask.
         
     Returns
     -------
@@ -430,7 +432,7 @@ def add_mask_circle(mask, x, y, radius):
     ny = np.arange(mask.shape[0])
     xx, yy = np.meshgrid(nx, ny)
     r = np.sqrt((xx - x)**2 + (yy - y)**2)
-    mask[r <= radius] = 1
+    mask[r <= radius] = value
     return mask
 
 
@@ -866,11 +868,11 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
     # Final segments; merged the segments inside target_mask_i.
     segm_i = segment_add(debl_i, target_mask_i)  
     
-    # Combine the segments
-    segm_c = segment_combine(segm_o, segm_i, progress_bar=progress_bar)
+    ## Combine the segments
+    #segm_c = segment_combine(segm_o, segm_i, progress_bar=progress_bar)
     
-    # Remove the segments in the inner region of the target
-    segment_remove(segm_c, target_mask_i, overwrite=True)
+    ## Remove the segments in the inner region of the target
+    #segment_remove(segm_c, target_mask_i, overwrite=True)
 
     if plot:
         if interactive:
@@ -881,7 +883,7 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
                 ipy.run_line_magic('matplotlib', 'inline')
 
         if axs is None:
-            fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
+            fig, axs = plt.subplots(1, 3, figsize=(21, 7), sharex=True, sharey=True)
             fig.subplots_adjust(hspace=0.07, wspace=0.05)
         else:
             assert fig is not None, 'Please provide fig together with axs!'
@@ -893,7 +895,7 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
             norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
         norm = simple_norm(image, **norm_kwargs)
 
-        ax = axs[0, 0]
+        ax = axs[0]
         ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
         ax.plot(target_coord[0], target_coord[1], marker='+', ms=10, color='red')
         xlim = ax.get_xlim(); ylim = ax.get_ylim()
@@ -903,17 +905,7 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
         ax.set_xlim(xlim); ax.set_ylim(ylim)
         ax.set_title('Image', fontsize=18)
 
-        ax = axs[0, 1]
-        ax.imshow(segm_c, origin='lower', cmap=segm_c.cmap, interpolation='nearest')
-        xlim = ax.get_xlim(); ylim = ax.get_ylim()
-        plot_mask_contours(target_mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-        plot_mask_contours(target_mask_i, ax=ax, verbose=verbose, color='magenta', lw=0.5)
-        ax.set_xlim(xlim); ax.set_ylim(ylim)
-        ax.set_title('Combined segmentation', fontsize=18)
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-        ax = axs[1, 0]
+        ax = axs[1]
         ax.imshow(segm_i, origin='lower', cmap=segm_i.cmap, interpolation='nearest')
         xlim = ax.get_xlim(); ylim = ax.get_ylim()
         ax.set_xlim(xlim); ax.set_ylim(ylim)
@@ -921,24 +913,19 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
         ax.set_xticklabels([])
         ax.set_yticklabels([])
 
-        ax = axs[1, 1]
-
-        if segm_o is None:
-            ax.axis('off')
-        else:
-            ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
-            ax.set_title('Outer segmentation', fontsize=18)
-            ax.set_xticklabels([])
-            ax.set_yticklabels([])
+        ax = axs[2]
+        ax.imshow(segm_o, origin='lower', cmap=segm_o.cmap, interpolation='nearest')
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        ax.set_xlim(xlim); ax.set_ylim(ylim)
+        ax.set_title('Outer segmentation', fontsize=18)
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
 
     detection_results = {
         'segment_out': segm_o,
         'segment_in': segm_i,
-        'segment_combine': segm_c,
-        'target_mask_o': target_mask,
-        'target_mask_i': target_mask_i,
+        'mask_out': target_mask,
+        'mask_in': target_mask_i,
     }
     return detection_results
 
