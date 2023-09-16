@@ -17,7 +17,7 @@ from astropy.modeling import models, fitting
 from astropy.nddata import Cutout2D
 from astropy.utils.exceptions import AstropyUserWarning
 from scipy.ndimage import gaussian_filter
-from scipy.optimize import root_scalar
+from scipy.optimize import root_scalar, differential_evolution
 from scipy.interpolate import interp1d
 
 from photutils.segmentation import make_2dgaussian_kernel, detect_sources, deblend_sources
@@ -30,6 +30,7 @@ from rasterio.features import rasterize, shapes
 from shapely.geometry import shape, MultiPoint
 from shapely.affinity import scale
 from reproject import reproject_interp, reproject_adaptive
+from .utils_ellipse import fit_ellipse, cart_to_pol
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
 
@@ -446,7 +447,178 @@ def detect_source_extended(image:np.array, target_coord:tuple, target_mask:np.ar
     return detection_results
 
 
-def gen_aperture_ellipse(image, threshold_snr=2, geometry=None, 
+def find_aperture_bounds(image, aper_ref, mask=None, naper=10, threshold_snr=2, 
+                         fracs=[0.5, 3], plot=False, axs=None):
+    '''
+    Find the bounds of the aperture.
+    
+    Parameters
+    ----------
+    
+    Notes
+    -----
+    FIXME: doc
+    '''
+    fmin, fmax = fracs
+    aList = np.linspace(fmin * aper_ref.a, fmax * aper_ref.a, naper)
+    bList = aList * aper_ref.b / aper_ref.a
+    
+    aperList = [EllipticalAperture(aper_ref.positions, a, b, aper_ref.theta) for (a, b) in zip(aList, bList)]
+    annuList = [EllipticalAnnulus(aper_ref.positions, a_in=aList[loop], a_out=aList[loop+1], 
+                                  b_out=bList[loop+1], theta=aper_ref.theta) for loop in range(naper-1)]
+    
+    intens = []
+    intens_rms = []
+    area = []
+    for annu in annuList:
+        stats = ApertureStats(image, annu, mask=mask, sum_method='center')
+        intens.append(stats.mean)
+        intens_rms.append(stats.mad_std)
+        area.append(stats.sum_aper_area.value)
+    
+    intens = np.array(intens)
+    intens_rms = np.array(intens_rms) / np.sqrt(area)
+    snr = intens / intens_rms
+    
+    search_idx = np.where((snr - threshold_snr) < 0)[0]
+
+    if len(search_idx > 0):
+        idx = search_idx[0]
+        a_in = annuList[idx-1].a_in
+        a_out = annuList[idx].a_out
+    else:
+        a_in = np.nan
+        a_out = np.nan
+    
+    if plot:
+        if axs is None:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+    
+        ax = axs[0]
+        norm = simple_norm(image, stretch='asinh', percent=99.99, asinh_a=0.01)
+        ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+
+        if mask is not None:
+            xlim, ylim = ax.get_xlim(), ax.get_ylim()
+            plot_mask_contours(mask, ax=ax, color='w', ls='-', lw=0.5)
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+        
+        for ap in aperList:
+            ap.plot(ax=ax, color='C2', ls=':', lw=1.5)
+
+        ax.minorticks_on()
+        ax.set_title('Image', fontsize=18)
+            
+        ax = axs[1]
+        sma = (aList[:-1] + aList[1:]) / 2
+        ax.plot(sma, snr, marker='o', color='C3')
+        ax.axvspan(xmin=a_in, xmax=a_out, ls='--', edgecolor='gray', facecolor='none', hatch='/')
+        ax.axhline(y=threshold_snr, ls='--', color='gray')
+        ax.set_xlabel('Semimajor axis (pix)', fontsize=24)
+        ax.set_ylabel('SNR', fontsize=24, color='C3')
+        ax.minorticks_on()
+        
+        axr = ax.twinx()
+        axr.plot(sma, intens, marker='o', color='C0')
+        axr.set_ylabel('Intensity', fontsize=24, color='C0')
+        axr.minorticks_on()
+        
+    return a_in, a_out
+
+
+def gen_aperture_ellipse(image, coord_pix, threshold_segm, psf_fwhm, threshold_snr=2, 
+                         mask=None, naper=20, fracs=[1, 5], plot=False, axs=None, 
+                         **segm_kwargs):
+    '''
+    Generate elliptical aperture.
+    
+    Parameters
+    ----------
+    image : 2D array
+        The image.
+    coord_pix : tuple
+        Coordinate of the target star, units: pixel.
+    threshold_segm : float
+        The threshold to detect the segmentation of the target.
+    psf_fwhm : float
+        The FWHM of the PSF in the units of pixel.
+    threshold_snr : float (default: 2)
+        The threshold to SNR to determine the aperture.
+    mask (optional) : 2D bool array
+        A boolean mask, with the same shape as the input data, where True 
+        values indicate masked pixels. Masked pixels will not be included in 
+        any source.
+    naper : int (default: 20)
+        The number of apertures sampled in the first step search.
+    fracs : list (default: [1, 5])
+        The minimum and maximum aperture size as the factors of the reference 
+        aperture.
+    plot : bool (default: False)
+        Plot the image and the aperture searching results if True.
+    axs : Matplotlib Axes
+        The axes to plot. Four panels (2x2) are needed.
+    
+    Notes
+    -----
+    FIXME: doc
+    '''
+    if plot:
+        if axs is None:
+            fig, axs = plt.subplots(2, 2, figsize=(14, 14))
+    
+    aper_ref = gen_aperture_ref(
+        image, threshold=threshold_segm, coord_pix=coord_pix, mask=mask, 
+        plot=plot, axs=axs[0, :], **segm_kwargs)
+    a_in, a_out = find_aperture_bounds(
+        image, aper_ref, mask=mask, naper=naper, threshold_snr=threshold_snr, fracs=fracs, 
+        plot=plot, axs=axs[1, :])
+    
+    if ~np.isnan(a_in):
+        aList = np.arange(a_in, a_out, psf_fwhm)
+        bList = aList * aper_ref.b / aper_ref.a
+        annuList = [EllipticalAnnulus(aper_ref.positions, a_in=aList[loop], a_out=aList[loop+1], 
+                                      b_out=bList[loop+1], theta=aper_ref.theta) 
+                                      for loop in range(len(aList)-1)]
+    
+        intens = []
+        intens_rms = []
+        area = []
+        for annu in annuList:
+            stats = ApertureStats(image, annu, mask=mask, sum_method='center')
+            intens.append(stats.mean)
+            intens_rms.append(stats.mad_std)
+            area.append(stats.sum_aper_area.value)
+    
+        intens = np.array(intens)
+        intens_rms = np.array(intens_rms) / np.sqrt(area)
+        snr = intens / intens_rms
+        snr_sub = (snr - threshold_snr)
+    
+        sma = (aList[:-1] + aList[1:]) / 2
+        
+        snr_func = interp1d(sma, snr_sub**2)
+        res = differential_evolution(snr_func, bounds=[(sma.min(), sma.max())])
+        ap_r = res.x[0]
+
+        bp_r = ap_r * aper_ref.b / aper_ref.a
+        aper = EllipticalAperture(aper_ref.positions, ap_r, bp_r, aper_ref.theta)
+    else:
+        aper = None
+    
+    if plot & (aper is not None):
+        ax = axs[1, 0]
+        aper.plot(ax=ax, color='C2', lw=2)
+
+        ax = axs[1, 1]
+        ax.plot(sma, snr, color='C1', label='Refined SNR')
+        ax.axvline(ap_r, color='C2', ls='--', lw=2, label='Refined SMA')
+        ax.legend(loc='upper right', fontsize=16)
+    
+    return aper
+
+
+def gen_aperture_ellipse_deprecated(image, threshold_snr=2, geometry=None, 
                          step=0.05, fix_center=False, fix_pa=False, 
                          fix_eps=False, integrmode='median', 
                          expand_factor=1.25, plot=False, axs=None, 
@@ -553,16 +725,16 @@ def gen_aperture_ellipse(image, threshold_snr=2, geometry=None,
             ax.set_xlim(xlim); ax.set_ylim(ylim)
 
             ax = axs[1]
-            ax.plot(sma, np.log10(intens), color='C0')
+            ax.plot(sma, intens, color='C0')
             ax.minorticks_on()
             ax.set_xlabel('Semimajor axis (pixel)', fontsize=24)
-            ax.set_ylabel(r'$\log$ Intensity', fontsize=24, color='C0')
+            ax.set_ylabel(r'Intensity', fontsize=24, color='C0')
             axr = ax.twinx()
-            axr.plot(sma, np.log10(intens/intens_err), color='C3')
-            axr.axhline(y=np.log10(threshold_snr), ls='--', color='gray')
+            axr.plot(sma, intens/intens_err, color='C3')
+            axr.axhline(y=threshold_snr, ls='--', color='gray')
             axr.axvline(x=res.root, ls='--', color='gray')
             axr.minorticks_on()
-            axr.set_ylabel(r'$\log$ SNR', fontsize=24, color='C3')
+            axr.set_ylabel(r'SNR', fontsize=24, color='C3')
     
     return aper
 
@@ -778,6 +950,48 @@ def gen_images_matched(atlas, psf_fwhm:float, image_size:float,
     return images, output_wcs
 
 
+def gen_aperture_ref(image, threshold, coord_pix, mask=None, plot=False, 
+                     axs=None, **segm_kwargs):
+    '''
+    Generate the reference ellipse parameters for the aperture. The method 
+    follows Clark et al. (2017).
+    
+    Parameters
+    ----------
+    
+    Notes
+    -----
+    FIXME: doc
+    '''
+    segm, cimg = get_image_segmentation(
+        image, threshold=threshold, mask=mask, plot=False, **segm_kwargs)
+    
+    x, y = coord_pix
+    mask = segm == segm.data[int(y), int(x)]
+    poly = get_mask_polygons(mask)[0]
+    p = shape(poly)
+    x, y = p.convex_hull.exterior.coords.xy
+    coeffs = fit_ellipse(np.array(x), np.array(y))
+    x0, y0, ap, bp, e, phi = cart_to_pol(coeffs)
+    aper = EllipticalAperture((x0, y0), ap, bp, phi)
+    
+    if plot:
+        if axs is None:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+            fig.subplots_adjust(wspace=0.03)
+        
+        ax = axs[0]
+        ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
+        ax.plot(x, y, ls='none', marker='.', ms=5, color='red')
+
+        ax = axs[1]
+        ax.imshow(mask, origin='lower', cmap='Greys_r')
+        ax.plot(x, y, ls='none', marker='.', ms=5, color='red')
+        
+        aper.plot(ax=ax, color='cyan', zorder=3, lw=1.5)
+    return aper
+
+
 def get_mask_polygons(mask, connectivity=8):
     '''
     Get polygons from the mask.
@@ -809,7 +1023,7 @@ def get_mask_polygons(mask, connectivity=8):
     return pList
 
 
-def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8, 
+def get_image_segmentation(data, threshold, npixels=12, mask=None, connectivity=8, 
                            kernel_fwhm=0, deblend=False, nlevels=32, contrast=0.001, 
                            mode='linear', nproc=1, progress_bar=True, 
                            plot=False, axs=None, norm_kwargs=None, 
@@ -823,7 +1037,7 @@ def get_image_segmentation(data, threshold, npixels, mask=None, connectivity=8,
         The image data to be decomposed.
     threshold : float
         The threshold ot detect source with image segmentation.
-    npixels : int
+    npixels : int (default: 12)
         The minimum number of connected pixels, each greater than threshold, 
         that an object must have to be detected. npixels must be a positive 
         integer.
