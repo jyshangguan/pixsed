@@ -64,7 +64,7 @@ class Image(object):
 
     def __init__(self, filename=None, data=None, header=None, coord_sky=None,
                  coord_pix=None, pixel_scale=None, target=None, telescope=None,
-                 band=None,verbose=True):
+                 band=None, verbose=True):
         """
         Parameters
         ----------
@@ -154,7 +154,6 @@ class Image(object):
             self._band = clean_header_string(self._header.get('FILTER', None))
         else:
             self._band = band
-
 
         # Set coordinates
         if coord_sky is not None:
@@ -2566,8 +2565,6 @@ class Atlas(object):
             else:
                 band = None
 
-
-
             self._image_list.append(Image(filename=f, coord_sky=coord_sky,
                                           telescope=tel, band=band,
                                           verbose=verbose))
@@ -2631,23 +2628,23 @@ class Atlas(object):
         ra = header['RA']
         dec = header["DEC"]
         pa0 = header["APER_PA"]
-        ep0 = (header['XCOORD']+header["APER_SMA"]*math.cos(pa0), header['yCOORD']+header["APER_SMA"]*math.sin(pa0))
+        ep0 = (
+        header['XCOORD'] + header["APER_SMA"] * math.cos(pa0), header['yCOORD'] + header["APER_SMA"] * math.sin(pa0))
         ep_world = w0.pixel_to_world(ep0[0], ep0[1])
         ep = w.world_to_pixel(ep_world)
         sky_coord = SkyCoord(ra, dec, unit='deg')
         x, y = w.world_to_pixel(sky_coord)
-        sma = header["APER_SMA"]*pxs/pxs_matched
-        smb = header["APER_SMB"]*pxs/pxs_matched
-        pa = math.atan((ep[1]-y)/(ep[0]-x))
+        sma = header["APER_SMA"] * pxs / pxs_matched
+        smb = header["APER_SMB"] * pxs / pxs_matched
+        pa = math.atan((ep[1] - y) / (ep[0] - x))
 
-        aper = EllipticalAperture((x,y), sma, smb, pa)
+        aper = EllipticalAperture((x, y), sma, smb, pa)
 
         return aper
 
-
     def aperture_photometry(self, aperture, mask=None, rannu_in=1.25,
                             rannu_out=1.6,
-                            error=True, calibration_list=None,
+                            error=True, bkgsub=True, calibration_list=None,
                             nsample=300,
                             area_sample=[0.02, 0.04, 0.08, 0.16],
                             plot=False, ncols=1, axs=None,
@@ -2705,16 +2702,24 @@ class Atlas(object):
             else:
                 ax = None
 
-
-
-            flux, sigma = image_photometry(image, aperture,
-                                           calibration_uncertainty=calibration_list[loop],
-                                           mask=mask, rannu_in=rannu_in,
-                                           rannu_out=rannu_out, error=error,
-                                           nsample=nsample,
-                                           area_sample=area_sample,
-                                           plot=plot, ax=ax,
-                                           norm_kwargs=norm_kwargs)
+            if error:
+                flux, sigma = image_photometry(image, aperture,
+                                               calibration_uncertainty=calibration_list[loop],
+                                               mask=mask, bkgsub=bkgsub, rannu_in=rannu_in,
+                                               rannu_out=rannu_out, error=error,
+                                               nsample=nsample,
+                                               area_sample=area_sample,
+                                               plot=plot, ax=ax,
+                                               norm_kwargs=norm_kwargs)
+            else:
+                flux = image_photometry(image, aperture,
+                                        calibration_uncertainty=calibration_list[loop],
+                                        mask=mask, bkgsub=bkgsub, rannu_in=rannu_in,
+                                        rannu_out=rannu_out, error=error,
+                                        nsample=nsample,
+                                        area_sample=area_sample,
+                                        plot=plot, ax=ax,
+                                        norm_kwargs=norm_kwargs)
 
             if loop > 0:
                 ax.get_legend().remove()

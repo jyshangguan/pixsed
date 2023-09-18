@@ -4,6 +4,7 @@ import random
 import tqdm
 import warnings
 import numpy as np
+import numpy.ma as ma
 from copy import deepcopy
 import astropy.units as u
 import matplotlib.pyplot as plt
@@ -534,6 +535,7 @@ def extract_fix_isophotes(image, xcen, ycen, initsma, eps, pa, step=1,
 
     return iso_fix
 
+
 def fit_ellipse(x, y):
     """
 
@@ -547,7 +549,7 @@ def fit_ellipse(x, y):
 
     """
 
-    D1 = np.vstack([x**2, x*y, y**2]).T
+    D1 = np.vstack([x ** 2, x * y, y ** 2]).T
     D2 = np.vstack([x, y, np.ones(len(x))]).T
     S1 = D1.T @ D1
     S2 = D1.T @ D2
@@ -557,7 +559,7 @@ def fit_ellipse(x, y):
     C = np.array(((0, 0, 2), (0, -1, 0), (2, 0, 0)), dtype=float)
     M = np.linalg.inv(C) @ M
     eigval, eigvec = np.linalg.eig(M)
-    con = 4 * eigvec[0]* eigvec[2] - eigvec[1]**2
+    con = 4 * eigvec[0] * eigvec[2] - eigvec[1] ** 2
     ak = eigvec[:, np.nonzero(con > 0)[0]]
     return np.concatenate((ak, T @ ak)).ravel()
 
@@ -584,16 +586,16 @@ def cart_to_pol(coeffs):
     f = coeffs[4] / 2
     g = coeffs[5]
 
-    den = b**2 - a*c
+    den = b ** 2 - a * c
     if den > 0:
         raise ValueError('coeffs do not represent an ellipse: b^2 - 4ac must'
                          ' be negative!')
 
     # The location of the ellipse centre.
-    x0, y0 = (c*d - b*f) / den, (a*f - b*d) / den
+    x0, y0 = (c * d - b * f) / den, (a * f - b * d) / den
 
-    num = 2 * (a*f**2 + c*d**2 + g*b**2 - 2*b*d*f - a*c*g)
-    fac = np.sqrt((a - c)**2 + 4*b**2)
+    num = 2 * (a * f ** 2 + c * d ** 2 + g * b ** 2 - 2 * b * d * f - a * c * g)
+    fac = np.sqrt((a - c) ** 2 + 4 * b ** 2)
     # The semi-major and semi-minor axis lengths (these are not sorted).
     ap = np.sqrt(num / den / (fac - a - c))
     bp = np.sqrt(num / den / (-fac - a - c))
@@ -606,21 +608,21 @@ def cart_to_pol(coeffs):
         ap, bp = bp, ap
 
     # The eccentricity.
-    r = (bp/ap)**2
+    r = (bp / ap) ** 2
     if r > 1:
-        r = 1/r
+        r = 1 / r
     e = np.sqrt(1 - r)
 
     # The angle of anticlockwise rotation of the major-axis from x-axis.
     if b == 0:
-        phi = 0 if a < c else np.pi/2
+        phi = 0 if a < c else np.pi / 2
     else:
-        phi = np.arctan((2.*b) / (a - c)) / 2
+        phi = np.arctan((2. * b) / (a - c)) / 2
         if a > c:
-            phi += np.pi/2
+            phi += np.pi / 2
     if not width_gt_height:
         # Ensure that phi is the angle to rotate to the semi-major axis.
-        phi += np.pi/2
+        phi += np.pi / 2
     phi = phi % np.pi
 
     return x0, y0, ap, bp, e, phi
@@ -667,7 +669,8 @@ def gen_aperture_ref(image, threshold, coord_pix, mask=None, plot=False,
         aper.plot(ax=ax, color='cyan', zorder=3, lw=1.5)
     return aper
 
-def get_ellipse_pts(params, npts=100, tmin=0, tmax=2*np.pi):
+
+def get_ellipse_pts(params, npts=100, tmin=0, tmax=2 * np.pi):
     """
     Return npts points on the ellipse described by the params = x0, y0, ap,
     bp, e, phi for values of the parametric variable t between tmin and tmax.
@@ -680,9 +683,6 @@ def get_ellipse_pts(params, npts=100, tmin=0, tmax=2*np.pi):
     x = x0 + ap * np.cos(t) * np.cos(phi) - bp * np.sin(t) * np.sin(phi)
     y = y0 + ap * np.cos(t) * np.sin(phi) + bp * np.sin(t) * np.cos(phi)
     return x, y
-
-
-
 
 
 def find_aperture_bounds(image, aper_ref, mask=None, naper=10, threshold_snr=2,
@@ -1066,6 +1066,7 @@ def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8,
 
     return mask, smap, cdata
 
+
 def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
                        pixel_scale: float = None, progress_bar=False,
                        verbose=False):
@@ -1122,19 +1123,27 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
 
     for img in imGen:
         if psf_fwhm > img._psf_fwhm:
+            '''
             fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
             sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
             data_conv = gaussian_filter(img._data_clean, sigma=sigma)
+            '''
+            fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
+            size = int(psf_fwhm / img._pxs)
+            if size % 2 == 0:
+                size += 1
+            kernel = make_2dgaussian_kernel(fwhm / img._pxs, size)
+            data_conv = convolve(img._data_clean, kernel)
+
         else:
             if verbose:
                 print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
             data_conv = img._data_clean
 
-        data_rebin = reproject_adaptive((data_conv, img._wcs), output_wcs,
-                                        shape_out=shape_out, kernel='Gaussian',
-                                        conserve_flux=True,
-                                        boundary_mode='ignore',
-                                        return_footprint=False)
+        data_rebin, _ = reproject_adaptive((data_conv, img._wcs), output_wcs,
+                                           shape_out=shape_out, kernel='gaussian',
+                                           conserve_flux=True,
+                                           boundary_mode='ignore')
 
         images.append(data_rebin)
     return images, output_wcs
@@ -1334,7 +1343,7 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None,
 
 
 def image_photometry(image, aperture, calibration_uncertainty,
-                     mask=None, rannu_in=1.25, rannu_out=1.60,
+                     mask=None, bkgsub=True, rannu_in=1.25, rannu_out=1.60,
                      error=True, nsample=300,
                      area_sample=(0.02, 0.04, 0.08, 0.16, 0.32),
                      plot=False, ax=None, norm_kwargs=None):
@@ -1370,27 +1379,39 @@ def image_photometry(image, aperture, calibration_uncertainty,
                                 b_in=aperture.b * rannu_in,
                                 b_out=aperture.b * rannu_out,
                                 theta=aperture.theta)
-
+    mask_nan = np.isnan(image)
+    if mask is not None:
+        mask = mask | mask_nan
+    else:
+        mask = mask_nan
     phot_table = aperture_photometry(image, aperture, mask=mask)
     aperture_area = aperture.area_overlap(image, mask=mask)
-    aperstats = ApertureStats(image, annulus)
-    total_bkg = aperstats.mean * aperture_area
-    phot_bkgsub = phot_table['aperture_sum'][0] - total_bkg
+
+    if bkgsub:
+        aperstats = ApertureStats(image, annulus)
+        total_bkg = aperstats.mean * aperture_area
+        phot_bkgsub = phot_table['aperture_sum'][0] - total_bkg
+    else:
+        phot_bkgsub = phot_table['aperture_sum'][0]
 
     if error:
         sigma_box = []
-        for i in range(len(area_sample)):
-            sample_box = []
-            aper_list = gen_random_apertures(image, nsample=nsample, mask_aper=aperture, mask=mask,
-                                             percent=area_sample[i])
-            for j in range(len(aper_list)):
-                phot_table = aperture_photometry(image, aper_list[j])
-                sample_box.append(phot_table['aperture_sum'][0])
-            sigma_t = np.std(np.array(sample_box))
-            sigma_box.append(sigma_t)
-        sigma = error_curve_fit(area_sample, sigma_box)
-        if calibration_uncertainty is not None:
-            sigma = math.sqrt(sigma**2 + (phot_bkgsub*calibration_uncertainty)**2)
+        if area_sample is not None:
+            for i in range(len(area_sample)):
+                sample_box = []
+                aper_list = gen_random_apertures(image, nsample=nsample, mask_aper=aperture, mask=mask,
+                                                 percent=area_sample[i])
+                for j in range(len(aper_list)):
+                    phot_table = aperture_photometry(image, aper_list[j])
+                    sample_box.append(phot_table['aperture_sum'][0])
+                sigma_t = np.std(np.array(sample_box))
+                sigma_box.append(sigma_t)
+            sigma = error_curve_fit(area_sample, sigma_box)
+            if calibration_uncertainty is not None:
+                sigma = math.sqrt(sigma ** 2 + (phot_bkgsub * calibration_uncertainty) ** 2)
+        else:
+            if calibration_uncertainty is not None:
+                sigma = phot_bkgsub * calibration_uncertainty
 
     if plot:
         if ax is None:
@@ -1406,15 +1427,27 @@ def image_photometry(image, aperture, calibration_uncertainty,
         annulus.plot(ax=ax, color='cyan', ls='--', lw=1.0, label='Background')
         ax.legend(loc='upper right', fontsize=16)
         if error:
-            ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}\nBkg: {total_bkg:.2e}\nSigma: {sigma:.2e}',
-                    fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
-                    bbox=dict(alpha=0.8, color='w'))
+            if bkgsub:
+                ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}\nBkg: {total_bkg:.2e}\nSigma: {sigma:.2e}',
+                        fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
+                        bbox=dict(alpha=0.8, color='w'))
+            else:
+                ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}\nSigma: {sigma:.2e}',
+                        fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
+                        bbox=dict(alpha=0.8, color='w'))
         else:
-            ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}\nBkg: {total_bkg:.2e}',
-                    fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
-                    bbox=dict(alpha=0.8, color='w'))
-
-    return phot_bkgsub, sigma
+            if bkgsub:
+                ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}\nBkg: {total_bkg:.2e}',
+                        fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
+                        bbox=dict(alpha=0.8, color='w'))
+            else:
+                ax.text(0.95, 0.05, f'Phot: {phot_bkgsub:.2e}',
+                        fontsize=14, transform=ax.transAxes, va='bottom', ha='right',
+                        bbox=dict(alpha=0.8, color='w'))
+    if error:
+        return phot_bkgsub, sigma
+    else:
+        return phot_bkgsub
 
 
 def error_curve_fit(area, noise, plot=False):
