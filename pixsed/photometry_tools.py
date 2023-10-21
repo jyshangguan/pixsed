@@ -88,7 +88,7 @@ class Image(object):
             self._header = header.copy()
 
             if pixel_scale is None:
-                self._pxs = (abs(header['CDELT1']) * 3600.)
+                self._pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
 
         else:
             hdul = fits.open(filename)
@@ -132,7 +132,7 @@ class Image(object):
                 self._data = hdul[0].data
 
                 if pixel_scale is None:
-                    self._pxs = (abs(header['CDELT1']) * 3600.)
+                    self._pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
 
         if hasattr(self, '_data'):
             self._shape = self._data.shape
@@ -2623,7 +2623,7 @@ class Atlas(object):
         header = hdul[0].header
         w0 = WCS(header)
         w = self._wcs_match
-        pxs = abs(header['CDELT1']) * 3600.
+        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
         pxs_matched = self._pxs_match
         ra = header['RA']
         dec = header["DEC"]
@@ -3307,7 +3307,7 @@ class Atlas_deprecated(object):
             for b in range(-ra, ra + 1):
                 if sqrt(a ** 2 + b ** 2) <= ra:
                     mask[int(yc) + b, int(xc) + a] = True
-        pxs = (abs(self._header['CDELT1']) * 3600.)
+        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
         fitted_line_list = []
         for k in range(len(img_list_matched)):
             error_list = []
@@ -3344,7 +3344,7 @@ class Atlas_deprecated(object):
         self._coord = read_coordinate(self._ra, self._dec)
         w = WCS(header)
         xc, yc = w.world_to_pixel(self._coord)
-        pxs = (abs(self._header['CDELT1']) * 3600.)
+        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
 
         ra = radius / pxs
 

@@ -887,12 +887,12 @@ def gen_random_apertures(img, nsample, mask_aper, percent, mask=None,
             continue
         aper_temp = EllipticalAperture((x_c, y_c), sma, smb, pa)
         phot_temp0 = aperture_photometry(total_mask, aper_temp)
-        if phot_temp0['aperture_sum'][0] != 0:
+        if phot_temp0['aperture_sum'][0] != 0.:
             counter += 1
             continue
         phot_temp1 = aperture_photometry(aperture_map, aper_temp)
-        if phot_temp1['aperture_sum'][0] < 0.5 * area:
-            aperture_map = add_mask_ellipse(aperture_map, x_c, y_c, sma, smb, pa)
+        if phot_temp1['aperture_sum'][0] == 0.:
+            aperture_map[int(y_c), int(x_c)] = 1
             aper_list.append(aper_temp)
             counter += 1
         else:
@@ -1123,7 +1123,7 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
 
     for img in imGen:
         if psf_fwhm > img._psf_fwhm:
-            '''
+
             fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
             sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
             data_conv = gaussian_filter(img._data_clean, sigma=sigma)
@@ -1134,7 +1134,7 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
                 size += 1
             kernel = make_2dgaussian_kernel(fwhm / img._pxs, size)
             data_conv = convolve(img._data_clean, kernel)
-
+            '''
         else:
             if verbose:
                 print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
@@ -1340,6 +1340,9 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None,
         ax.plot(xy_poly[:, 0] - x1, xy_poly[:, 1] - y1, color='cyan', lw=2)
 
     return data_s, bounds
+
+
+
 
 
 def image_photometry(image, aperture, calibration_uncertainty,
