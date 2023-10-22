@@ -1247,8 +1247,7 @@ def image_photometry(image, aperture, mask=None, rannu_in=1.25, rannu_out=1.60,
     return phot_bkgsub
 
 
-def plot_image(data, ax=None, percentile=99.5, vmin=None, vmax=None, stretch=None,
-               origin='lower', cmap='gray', **kwargs):
+def plot_image(data, fig=None, ax=None, norm_kwargs=None, imshow_kwargs=None, interactive=False):
     """
     Plot the image.
 
@@ -1276,19 +1275,41 @@ def plot_image(data, ax=None, percentile=99.5, vmin=None, vmax=None, stretch=Non
     -----
     None.
     """
+    if interactive:
+        ipy = get_ipython()
+        ipy.run_line_magic('matplotlib', 'tk')
+
+        def on_close(event):
+            ipy.run_line_magic('matplotlib', 'inline')
+
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 7))
 
-    if stretch is None:
-        stretch = LogStretch()
+    if interactive:
+        fig.canvas.mpl_connect('close_event', on_close)
+
+    norm_kwargs_default = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+    if norm_kwargs is None:
+        norm_kwargs = norm_kwargs_default
     else:
-        stretch = stretchDict[stretch]
+        for k, v in norm_kwargs_default.items():
+            if k not in norm_kwargs:
+                norm_kwargs[k] = v
 
-    norm = ImageNormalize(interval=PercentileInterval(percentile), vmin=vmin, vmax=vmax, stretch=stretch)
-    if 'norm' not in kwargs:
-        kwargs['norm'] = norm
+        if ('min_cut' in norm_kwargs) | ('max_cut' in norm_kwargs):
+            norm_kwargs['percent'] = None
 
-    ax.imshow(data, origin=origin, cmap=cmap, **kwargs)
+    norm = simple_norm(data, **norm_kwargs)
+
+    imshow_kwargs_default = dict(origin='lower', cmap='Greys_r', norm=norm)
+    if imshow_kwargs is None:
+        imshow_kwargs = imshow_kwargs_default
+    else:
+        for k, v in imshow_kwargs_default.items():
+            if k not in imshow_kwargs:
+                imshow_kwargs[k] = v
+
+    ax.imshow(data, **imshow_kwargs)
     ax.minorticks_on()
     return ax
 
@@ -1697,3 +1718,20 @@ def xmatch_gaiadr3(cat, radius, colRA1='ra', colDec1='dec'):
     return t_o
 
 
+def cutout_image(image, center, size_x, size_y):
+    '''
+    Cut the image.
+
+    Parameters
+    ----------
+    [FIXME]: doc
+    '''
+    assert isinstance(size_x, int), 'The size_x should be int!'
+    assert isinstance(size_y, int), 'The size_x should be int!'
+
+    x0 = int(center[1]) - size_x // 2
+    x1 = x0 + size_x
+    y0 = int(center[0]) - size_y // 2
+    y1 = y0 + size_y
+    image_cut = image[x0:x1, y0:y1]
+    return image_cut

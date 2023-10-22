@@ -462,7 +462,7 @@ class Image(object):
             The returns of sigma_clipped_stats().
         '''
         if mask_type == 'quick':
-            if hasattr(self, '_mask_field'):
+            if hasattr(self, '_mask_coverage'):
                 data = self._data[~self._mask_coverage]
             else:
                 data = self._data.flatten()
@@ -1115,7 +1115,7 @@ class Image(object):
         # Start to work
         mask = self._mask_contaminant
 
-        if self._mask_manual is None:
+        if getattr(self, '_mask_manual') is None:
             self._mask_manual = np.zeros_like(mask, dtype=bool)
     
         fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
