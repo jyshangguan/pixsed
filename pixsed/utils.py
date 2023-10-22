@@ -1342,9 +1342,6 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None,
     return data_s, bounds
 
 
-
-
-
 def image_photometry(image, aperture, calibration_uncertainty,
                      mask=None, bkgsub=True, rannu_in=1.25, rannu_out=1.60,
                      error=True, nsample=300,
@@ -1576,15 +1573,11 @@ def poly_to_xy(poly):
 
     Returns
     -------
-    s : string
-        The string without comments and space.
+    xy : 2D array
+        The coordinates, [m, 2], for m points.
     '''
-    if s is None:
-        return None
-
-    s = s.split('/')[0]
-    s = s.strip()
-    return s
+    xy = np.array(poly['coordinates'][0])
+    return xy
 
 
 def read_coordinate(ra, dec):
@@ -1677,7 +1670,7 @@ def scale_mask(mask, factor, connectivity=8):
 
     Notes
     -----
-    FIXME: Finishe the doc!
+    [SGJY added]
     '''
     pList = get_mask_polygons(mask, connectivity=connectivity)
 

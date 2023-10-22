@@ -88,7 +88,7 @@ class Image(object):
             self._header = header.copy()
 
             if pixel_scale is None:
-                self._pxs = np.abs(header['CDELT1']) * 3600
+                self._pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
 
         else:
             hdul = fits.open(filename)
@@ -107,10 +107,12 @@ class Image(object):
                 for ext in extList:
                     if ext == 'psf_data':
                         continue
+
                     d = hdul[ext].data
 
                     if 'mask' in ext:
                         d = d.astype('bool')
+
                     if 'segm' in ext:
                         d = SegmentationImage(d.astype(int))
 
@@ -130,7 +132,7 @@ class Image(object):
                 self._data = hdul[0].data
 
                 if pixel_scale is None:
-                    self._pxs = np.abs(header['CDELT1']) * 3600
+                    self._pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
 
         if hasattr(self, '_data'):
             self._shape = self._data.shape
@@ -170,7 +172,6 @@ class Image(object):
             else:
                 if verbose:
                     print('[__init__] Please specify the target position!')
-
 
     def adapt_segment(self, segm_name, segm=None, filename=None, extension=1,
                       plot=False, fig=None, axs=None, norm_kwargs=None,
@@ -240,14 +241,14 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
 
             ax = axs[0]
             norm = simple_norm(self._data, **norm_kwargs)
             ax.imshow(self._data, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim()
+            xlim = ax.get_xlim();
             ylim = ax.get_ylim()
 
             mask = segm.data > 0
@@ -259,7 +260,6 @@ class Image(object):
             ax = axs[1]
             ax.imshow(segm, origin='lower', cmap=segm.cmap, interpolation='nearest')
             ax.set_title('(b) Segmentation', fontsize=18)
-
 
     def adapt_to(self, other, plot=False, fig=None, axs=None, norm_kwargs=None,
                  interactive=False, verbose=False):
@@ -344,7 +344,6 @@ class Image(object):
             self.plot_summary(fig=fig, axs=axs, norm_kwargs=norm_kwargs,
                               interactive=interactive, verbose=verbose)
 
-
     def add_mask(self, mask_name, mask_a=None, expand_factor=1, filename=None,
                  extension=1, plot=False, fig=None, axs=None, norm_kwargs=None,
                  interactive=False, verbose=False):
@@ -425,7 +424,7 @@ class Image(object):
             ax = axs[0]
             norm = simple_norm(self._data, **norm_kwargs)
             ax.imshow(self._data, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim()
+            xlim = ax.get_xlim();
             ylim = ax.get_ylim()
 
             plot_mask_contours(mask, verbose=verbose, ax=ax, color='cyan', lw=0.5)
@@ -440,7 +439,6 @@ class Image(object):
             ax = axs[2]
             ax.imshow(mask_a, origin='lower', cmap='Greys_r')
             ax.set_title('(c) Added contaminant mask', fontsize=18)
-
 
     def background_properties(self, mask_type='quick', sigma=3, maxiters=5, f_sample=1, **kwargs):
         '''
@@ -511,7 +509,6 @@ class Image(object):
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-
     def background_subtract2(self, plot=False, norm_kwargs=None):
         '''
         Remove the background of the image data.
@@ -528,13 +525,13 @@ class Image(object):
         '''
         assert hasattr(self, '_model_background'), 'Please run background_model() first!'
         self._data_subbkg = self._data - self._model_background
-        
+
         if plot:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
 
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=90, stretch='asinh', asinh_a=0.1)
-            
+
             ax = axs[0]
             norm = simple_norm(self._data, **norm_kwargs)
             ax.imshow(self._data, cmap='Greys_r', origin='lower', norm=norm)
@@ -545,6 +542,198 @@ class Image(object):
             ax.imshow(self._data_subbkg, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Background subtracted', fontsize=16)
 
+    def detect_source_outer_and_middle(self, threshold_o: float, threshold_i: float, threshold_inner_galaxy: float,
+                                       npixels_o=5, npixels_i=5, nlevels_o=32,
+                                       nlevel_i=256, contrast_o=0.001, contrast_i=1e-6,
+                                       connectivity=8, kernel_fwhm=0, mode='linear',
+                                       nproc=1, progress_bar=False, plot=False,
+                                       fig=None, axs=None, norm_kwargs=None,
+                                       interactive=False, verbose=False):
+        '''
+        Detect the image sources for the extended target. This function get
+        the segmentations of the image in two steps, one inside the target_mask
+        and one outside the target_mask.
+
+        Parameters
+        ----------
+        image : 2D array
+            The image data.
+        target_coord : tuple
+            The pixel coordinate of the target.
+        target_mask (optional) : 2D bool array
+            A boolean mask, with the same shape as the input data, where True
+            values indicate masked pixels. For extended targets, we generate two
+            segmentations with different parameters, one inside the target_mask and
+            one outside the target_mask.
+        threshold_o : float
+            Threshold to generate the segmentation outside target mask.
+        threshold_i : float
+            Threshold to generate the segmentation between the target mask and inner target mask.
+        threshold_inner_galaxy: float
+            Threshold to generate the segmentation of inner galaxy.
+        npixels_o : int (default: 5)
+            The minimum number of connected pixels, each greater than threshold,
+            that an object must have to be detected. npixels must be a positive
+            integer. It is for the outer segmentation.
+        npixels_i : int (default: 5)
+            The npixel for the inner segmentation.
+        nlevels_o : int (default: 32)
+            The number of multi-thresholding levels to use for deblending. Each
+            source will be re-thresholded at nlevels levels spaced between its
+            minimum and maximum values (non-inclusive). The mode keyword determines
+            how the levels are spaced. It is for the outer segmentation.
+        nlevels_i : int (default: 32)
+            The nlevel for the inner segmentation.
+        contrast_o : float (default: 0.001)
+            The fraction of the total source flux that a local peak must have (at
+            any one of the multi-thresholds) to be deblended as a separate object.
+            contrast must be between 0 and 1, inclusive. If contrast=0 then every
+            local peak will be made a separate object (maximum deblending).
+            If contrast=1 then no deblending will occur. The default is 0.001, which
+            will deblend sources with a 7.5 magnitude difference. It is for the
+            outer segmentation.
+        contrast_i : float (default: 1e-6)
+            The contrast for the inner segmentation.
+        connectivity : {4, 8} optional
+            The type of pixel connectivity used in determining how pixels are
+            grouped into a detected source. The options are 4 or 8 (default).
+            4-connected pixels touch along their edges. 8-connected pixels touch
+            along their edges or corners.
+        kernel_fwhm : float (default: 0)
+            The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
+        mode : {'exponential', 'linear', 'sinh'}, optional
+            The mode used in defining the spacing between the multi-thresholding
+            levels (see the nlevels keyword) during deblending. The 'exponential'
+            and 'sinh' modes have more threshold levels near the source minimum and
+            less near the source maximum. The 'linear' mode evenly spaces
+            the threshold levels between the source minimum and maximum.
+            The 'exponential' and 'sinh' modes differ in that the 'exponential'
+            levels are dependent on the source maximum/minimum ratio (smaller ratios
+            are more linear; larger ratios are more exponential), while the 'sinh'
+            levels are not. Also, the 'exponential' mode will be changed to 'linear'
+            for sources with non-positive minimum data values.
+        nproc : int (default: 1)
+            The number of processes to use for multiprocessing (if larger than 1).
+            If set to 1, then a serial implementation is used instead of a parallel
+            one. If None, then the number of processes will be set to the number of
+            CPUs detected on the machine. Please note that due to overheads,
+            multiprocessing may be slower than serial processing. This is especially
+            true if one only has a small number of sources to deblend. The benefits
+            of multiprocessing require ~1000 or more sources to deblend, with larger
+            gains as the number of sources increase.
+        progress_bar : bool (default: False)
+            Show the progress bar in various steps.
+        plot : bool (default: False)
+            Plot the data and segmentation map if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        if hasattr(self, '_data_convolved'):
+            image = self._data_convolved
+            image_name = 'Convolved data'
+        elif hasattr(self, '_data_subbkg'):
+            image = self._data_subbkg
+            image_name = 'Background subtracted data'
+        else:
+            raise ValueError('Cannot find neither _data_convolved nor _data_subbkg!')
+
+        assert hasattr(self, '_mask_galaxy'), 'The target mask is lacking!'
+
+        # if hasattr(self, '_mask_field'):
+        #    coverage_mask = ~self._mask_field
+        # else:
+        #    coverage_mask = None
+        coverage_mask = getattr(self, '_mask_coverage', None)
+
+        res = detect_source_extended(image, self._coord_pix,
+                                     self._mask_galaxy, threshold_o=threshold_o,
+                                     threshold_i=threshold_inner_galaxy,
+                                     npixels_o=npixels_o,
+                                     npixels_i=12, nlevels_o=nlevels_o,
+                                     nlevel_i=1, contrast_o=contrast_o,
+                                     contrast_i=1,
+                                     coverage_mask=coverage_mask,
+                                     connectivity=connectivity,
+                                     kernel_fwhm=kernel_fwhm, mode=mode,
+                                     nproc=nproc, progress_bar=progress_bar,
+                                     plot=False, verbose=verbose)
+        new_mask = res['mask_in'] | ~self._mask_galaxy
+        self._mask_galaxy_inner = res['mask_in']
+        self._segment_outer = res['segment_out']
+        new_res = get_image_segmentation(image, threshold=threshold_i, npixels=npixels_i, mask=new_mask, connectivity=8,
+                                         kernel_fwhm=kernel_fwhm, deblend=True, nlevels=nlevel_i, contrast=contrast_i,
+                                         mode='linear', nproc=1, progress_bar=True,
+                                         plot=False, axs=None, norm_kwargs=None,
+                                         interactive=False)
+        self._segment_edge = new_res[0]
+
+        # Remove the segments in the inner region of the target
+        segment_remove(self._segment_edge, self._mask_galaxy_inner, overwrite=True)
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 3, figsize=(21, 17), sharex=True, sharey=True)
+                fig.subplots_adjust(hspace=0.07, wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(image, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+            ax.plot(self._coord_pix[0], self._coord_pix[1], marker='+', ms=10, color='red')
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
+            plot_mask_contours(self._mask_galaxy, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            plot_mask_contours(self._mask_galaxy_inner, ax=ax, verbose=verbose, color='magenta', lw=0.5)
+
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
+            ax.set_title(image_name, fontsize=18)
+
+            ax = axs[1]
+            ax.imshow(self._segment_edge, origin='lower', cmap=self._segment_edge.cmap, interpolation='nearest')
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
+            ax.set_title('Middle segmentation', fontsize=18)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+
+            ax = axs[2]
+            ax.imshow(self._segment_outer, origin='lower', cmap=self._segment_outer.cmap, interpolation='nearest')
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
+            ax.set_title('Outer segmentation', fontsize=18)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
 
     def detect_source_extended(self, threshold_o:float, threshold_i:float, 
                                npixels_o=5, npixels_i=5, nlevels_o=32, 
@@ -725,9 +914,8 @@ class Image(object):
             ax.set_xticklabels([])
             ax.set_yticklabels([])
 
-    
-    def gen_image_clean(self, plot=False, fig=None, axs=None, norm_kwargs=None, 
-                         interactive=False, zoom=None, verbose=False):
+    def gen_image_clean(self, plot=False, fig=None, axs=None, norm_kwargs=None,
+                        interactive=False, zoom=None, verbose=False):
         '''
         Replace the masked region with the galaxy model.
 
@@ -735,6 +923,8 @@ class Image(object):
         ----------
         plot : bool (default: False)
             Plot the image and cleaned image if True.
+        galaxy_model: bool (default: True)
+            Use galaxy model to do a better interpolation.
         fig : Matplotlib Figure
             The figure to plot.
         axs : Matplotlib Axes
@@ -749,10 +939,17 @@ class Image(object):
             Show details if True.
         '''
         self._data_clean = self._data_subbkg.copy()
-        self._data_clean[self._mask_contaminant] = self._model_galaxy[self._mask_contaminant] + \
-                                                   self._model_galaxy_rms[self._mask_contaminant] * \
-                                                   np.random.randn(np.sum(self._mask_contaminant))
-        
+        mask_in = self._mask_inner | self._mask_edge
+        mask_galaxy = self._mask_galaxy
+        mask_out = self._mask_outer ^ (mask_galaxy & self._mask_outer)
+
+        self._data_clean[mask_in] = self._model_galaxy[mask_in] + \
+                                    self._model_galaxy_rms[mask_in] * \
+                                    np.random.randn(np.sum(mask_in))
+        self._data_clean[mask_out] = np.zeros(np.shape(self._data_clean))[mask_out] + \
+                                     self._model_galaxy_rms[mask_out] * \
+                                     np.random.randn(np.sum(mask_out))
+
         if plot:
             if interactive:
                 ipy = get_ipython()
@@ -769,35 +966,38 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(self._data_subbkg, **norm_kwargs)
 
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
             ax.imshow(self._data_clean, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Cleaned image', fontsize=18)
 
             if zoom is not None:
                 ax.set_xlim([zoom[0], zoom[1]])
                 ax.set_ylim([zoom[2], zoom[3]])
 
-
-    def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8, 
-                            kernel_fwhm=0, deblend=False, nlevels=32, 
-                            contrast=0.001, mode='linear', nproc=1, 
-                            progress_bar=False, expand_factor=1.2, plot=False, 
-                            fig=None, axs=None, norm_kwargs=None, 
-                            interactive=False, verbose=True): 
+    def gen_mask_background(self, threshold, npixels=12, mask=None, connectivity=8,
+                            kernel_fwhm=0, deblend=False, nlevels=32,
+                            contrast=0.001, mode='linear', nproc=1,
+                            progress_bar=False, expand_factor=1.2, plot=False,
+                            fig=None, axs=None, norm_kwargs=None,
+                            interactive=False, verbose=True):
         '''
         Generate the mask of the background.
 
@@ -806,17 +1006,17 @@ class Image(object):
         threshold : float
             Threshold of image segmentation.
         npixels : int
-            The minimum number of connected pixels, each greater than threshold, 
-            that an object must have to be detected. npixels must be a positive 
+            The minimum number of connected pixels, each greater than threshold,
+            that an object must have to be detected. npixels must be a positive
             integer.
         mask (optional) : 2D bool array
-            A boolean mask, with the same shape as the input data, where True 
-            values indicate masked pixels. Masked pixels will not be included in 
+            A boolean mask, with the same shape as the input data, where True
+            values indicate masked pixels. Masked pixels will not be included in
             any source.
         connectivity : {4, 8} optional
-            The type of pixel connectivity used in determining how pixels are 
-            grouped into a detected source. The options are 4 or 8 (default). 
-            4-connected pixels touch along their edges. 8-connected pixels touch 
+            The type of pixel connectivity used in determining how pixels are
+            grouped into a detected source. The options are 4 or 8 (default).
+            4-connected pixels touch along their edges. 8-connected pixels touch
             along their edges or corners.
         kernel_fwhm : float (default: 0)
             The kernel FWHM to smooth the image. If kernel_fwhm=0, skip the convolution.
@@ -839,7 +1039,7 @@ class Image(object):
         -----
         [SGJY added]
         '''
-        #_, med, std = sigma_clipped_stats(self._data, mask=mask, sigma=sigma)
+        # _, med, std = sigma_clipped_stats(self._data, mask=mask, sigma=sigma)
         assert self._bkg_median is not None, 'Please run background_properties() first to get _bkg_median!'
         assert self._bkg_std is not None, 'Please run background_properties() first to get _bkg_std!'
 
@@ -850,23 +1050,22 @@ class Image(object):
                 mask &= self._mask_coverage
 
         img_sub = self._data - self._bkg_median
-        mask, segm, _ = gen_image_mask(img_sub, threshold, npixels=npixels, 
-                                       mask=mask, connectivity=connectivity, 
-                                       kernel_fwhm=kernel_fwhm, deblend=deblend, 
-                                       nlevels=nlevels, contrast=contrast, 
-                                       mode=mode, nproc=nproc, 
-                                       progress_bar=progress_bar, 
-                                       expand_factor=expand_factor, bounds=None, 
-                                       choose_coord=None, plot=plot, fig=fig, 
-                                       axs=axs, norm_kwargs=norm_kwargs, 
-                                       interactive=interactive, verbose=verbose) 
+        mask, segm, _ = gen_image_mask(img_sub, threshold, npixels=npixels,
+                                       mask=mask, connectivity=connectivity,
+                                       kernel_fwhm=kernel_fwhm, deblend=deblend,
+                                       nlevels=nlevels, contrast=contrast,
+                                       mode=mode, nproc=nproc,
+                                       progress_bar=progress_bar,
+                                       expand_factor=expand_factor, bounds=None,
+                                       choose_coord=None, plot=plot, fig=fig,
+                                       axs=axs, norm_kwargs=norm_kwargs,
+                                       interactive=interactive, verbose=verbose)
         self._mask_background = mask
         self._segm_background = segm
 
-
-    def gen_mask_contaminant(self, expand_inner=1, expand_edge=1.2, 
-                             expand_outer=1.2, plot=False, fig=None, axs=None, 
-                             norm_kwargs=None, interactive=False, verbose=False): 
+    def gen_mask_contaminant(self, expand_inner=1, expand_edge=1.2,
+                             expand_outer=1.2, plot=False, fig=None, axs=None,
+                             norm_kwargs=None, interactive=False, verbose=False):
         '''
         Generate the mask of all contaminants.
 
@@ -917,7 +1116,7 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(self._data_subbkg, **norm_kwargs)
@@ -925,7 +1124,8 @@ class Image(object):
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
             ax.set_title('Image', fontsize=18)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
 
             ax = axs[1]
@@ -934,14 +1134,14 @@ class Image(object):
             plot_mask_contours(self._mask_outer, ax=ax, verbose=verbose, color='C0', lw=0.5)
             plot_mask_contours(self._mask_edge, ax=ax, verbose=verbose, color='C1', lw=0.5)
             plot_mask_contours(self._mask_inner, ax=ax, verbose=verbose, color='C2', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
 
-
-    def gen_mask_edge(self, expand_factor=1.2, plot=False, fig=None, 
-                      axs=None, norm_kwargs=None, interactive=False, 
+    def gen_mask_edge(self, expand_factor=1.2, plot=False, fig=None,
+                      axs=None, norm_kwargs=None, interactive=False,
                       verbose=False):
         '''
-        Generate the mask of the sources on the edge of the target galaxy. 
+        Generate the mask of the sources on the edge of the target galaxy.
         It takes the segments outside the inner mask of the target.
 
         Parameters
@@ -971,7 +1171,7 @@ class Image(object):
             mask = scale_mask(self._segment_edge.data, factor=expand_factor)
         else:
             mask = self._segment_edge.data > 0
-        
+
         self._mask_edge = mask
 
         if plot:
@@ -990,31 +1190,34 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(self._data_subbkg, **norm_kwargs)
 
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
-            ax.imshow(self._segment_edge, origin='lower', 
+            ax.imshow(self._segment_edge, origin='lower',
                       cmap=self._segment_edge.cmap, interpolation='nearest')
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Edge segmentation', fontsize=18)
 
-
-    def gen_mask_inner(self, expand_factor=1, plot=False, fig=None, axs=None, 
+    def gen_mask_inner(self, expand_factor=1, plot=False, fig=None, axs=None,
                        norm_kwargs=None, interactive=False, verbose=False):
         '''
-        Generate the mask of the sources overlapping with the target. It takes 
+        Generate the mask of the sources overlapping with the target. It takes
         the segments overlapping the target.
 
         Parameters
@@ -1044,7 +1247,7 @@ class Image(object):
             mask = scale_mask(self._segment_inner.data, factor=expand_factor)
         else:
             mask = self._segment_inner.data > 0
-        
+
         self._mask_inner = mask
 
         if plot:
@@ -1063,33 +1266,36 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(self._data_subbkg, **norm_kwargs)
 
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
-            ax.imshow(self._segment_inner, origin='lower', 
+            ax.imshow(self._segment_inner, origin='lower',
                       cmap=self._segment_inner.cmap, interpolation='nearest')
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Inner segmentation', fontsize=18)
-
 
     def gen_mask_manual(self, mode='draw', verbose=True):
         '''
-        Generate a manual mask.  A pop-up figure will be generated for 
+        Generate a manual mask.  A pop-up figure will be generated for
         interactive operations.
-        
-        Check the operation manual of the two modes in MaskBuilder_draw and 
+
+        Check the operation manual of the two modes in MaskBuilder_draw and
         MaskBuilder_segm in the utils_interactive module.
 
         Parameters
@@ -1112,24 +1318,24 @@ class Image(object):
         # Prepare the event functions
         def on_click(event):
             mb.on_click(event)
-        
+
         def on_press(event):
             mb.on_press(event)
-        
+
         def on_close(event):
             mb.on_close(event)
-    
+
         # Start to work
         mask = self._mask_contaminant
 
-        if getattr(self, '_mask_manual') is None:
+        if self._mask_manual is None:
             self._mask_manual = np.zeros_like(mask, dtype=bool)
-    
+
         fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
         fig.subplots_adjust(wspace=0.05, hspace=0.1)
-    
+
         if mode == 'draw':
-            mb = MaskBuilder_draw(self._data_subbkg, mask, mask_manual=self._mask_manual, 
+            mb = MaskBuilder_draw(self._data_subbkg, mask, mask_manual=self._mask_manual,
                                   ipy=ipy, fig=fig, axs=axs, verbose=verbose)
             fig.canvas.mpl_connect('button_press_event', on_click)
             fig.canvas.mpl_connect('key_press_event', on_press)
@@ -1137,19 +1343,18 @@ class Image(object):
             plt.show()
 
         elif mode == 'segm':
-            mb = MaskBuilder_segment(self._data_subbkg, mask, self._segment_map, 
-                                     mask_manual=self._mask_manual, ipy=ipy, fig=fig, 
+            mb = MaskBuilder_segment(self._data_subbkg, mask, self._segment_map,
+                                     mask_manual=self._mask_manual, ipy=ipy, fig=fig,
                                      axs=axs, verbose=verbose)
             fig.canvas.mpl_connect('button_press_event', on_click)
             fig.canvas.mpl_connect('close_event', on_close)
             plt.show()
 
-
-    def gen_mask_outer(self, expand_factor=1.2, plot=False, fig=None, 
-                       axs=None, norm_kwargs=None, interactive=False, 
+    def gen_mask_outer(self, expand_factor=1.2, plot=False, fig=None,
+                       axs=None, norm_kwargs=None, interactive=False,
                        verbose=False):
         '''
-        Generate the mask of the sources outside the target galaxy. 
+        Generate the mask of the sources outside the target galaxy.
 
         Parameters
         ----------
@@ -1178,7 +1383,7 @@ class Image(object):
             mask = scale_mask(self._segment_outer.data, factor=expand_factor)
         else:
             mask = self._segment_outer.data > 0
-        
+
         self._mask_outer = mask
 
         if plot:
@@ -1197,28 +1402,31 @@ class Image(object):
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
-        
+
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
             norm = simple_norm(self._data_subbkg, **norm_kwargs)
 
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
-            ax.imshow(self._segment_outer, origin='lower', 
+            ax.imshow(self._segment_outer, origin='lower',
                       cmap=self._segment_outer.cmap, interpolation='nearest')
-            xlim = ax.get_xlim(); ylim = ax.get_ylim()
+            xlim = ax.get_xlim();
+            ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim); ax.set_ylim(ylim)
+            ax.set_xlim(xlim);
+            ax.set_ylim(ylim)
             ax.set_title('Outer segmentation', fontsize=18)
 
-
-    def gen_model_background(self, box_size=None, filter_size=5, plot=False, 
+    def gen_model_background(self, box_size=None, filter_size=5, plot=False,
                              norm_kwargs=None, show_mask=False):
         '''
         Generate the background model.Using median background method.
@@ -1227,7 +1435,7 @@ class Image(object):
         box_size: int or tuple (ny, nx)
             The size used to calculate the local median.
             If None, the default size is 1/30 of the image size.
-            It is better not to use a too small box size, otherwise there is 
+            It is better not to use a too small box size, otherwise there is
             a high risk to remove the source emission.
         filter_size: int or tuple (ny, nx) (default: 5)
             The kernel size used to smooth the background model.
@@ -1245,14 +1453,14 @@ class Image(object):
         ny, nx = self._data.shape
 
         if not box_size:
-            box_size = (ny//30, nx//30)
+            box_size = (ny // 30, nx // 30)
 
         coverage_mask = getattr(self, '_mask_coverage', None)
 
         sigma_clip = SigmaClip(sigma=3.)
-        bkg_estimator = MedianBackground()
-        bkg = Background2D(self._data, box_size, mask=self._mask_background, 
-                           coverage_mask=coverage_mask, filter_size=filter_size, 
+        bkg_estimator = MeanBackground()
+        bkg = Background2D(self._data, box_size, mask=self._mask_background,
+                           coverage_mask=coverage_mask, filter_size=filter_size,
                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
         self._model_background = bkg.background
         self._model_background_rms = bkg.background_rms
@@ -1269,16 +1477,16 @@ class Image(object):
             ax.set_title('Data', fontsize=16)
 
             if show_mask:
-                xlim = ax.get_xlim(); ylim = ax.get_ylim()
-                plot_mask_contours(mask_background, ax=ax, verbose=False, color='cyan', lw=0.5)
-            
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+                plot_mask_contours(self._mask_background, ax=ax, verbose=False, color='cyan', lw=0.5)
+
             ax = axs[1]
             ax.imshow(self._model_background, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Background model', fontsize=16)
 
-
-    def gen_model_galaxy(self, box_size=None, filter_size=1, plot=False, 
-                         fig=None, axs=None, norm_kwargs=None, 
+    def gen_model_galaxy(self, box_size=None, filter_size=1, plot=False,
+                         fig=None, axs=None, norm_kwargs=None,
                          interactive=False, verbose=False):
         '''
         Generate the galaxy model with Photutils Background2D.
@@ -1352,7 +1560,7 @@ class Image(object):
 
             ax = axs[0]
             ax.imshow(self._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim()
+            xlim = ax.get_xlim();
             ylim = ax.get_ylim()
             plot_mask_contours(self._mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
             ax.set_xlim(xlim);
@@ -1361,12 +1569,11 @@ class Image(object):
 
             ax = axs[1]
             ax.imshow(self._model_galaxy, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim()
+            xlim = ax.get_xlim();
             ylim = ax.get_ylim()
-            ax.set_xlim(xlim)
+            ax.set_xlim(xlim);
             ax.set_ylim(ylim)
             ax.set_title('Galaxy model', fontsize=18)
-
 
     def gen_psf_model(self, extract_size=25, xmatch_radius=3, plx_snr=3,
                       threshold_flux=None, threshold_eccentricity=0.15,
@@ -1404,8 +1611,6 @@ class Image(object):
 
         fltr = tb['eccentricity'] < threshold_eccentricity
 
-        fltr = tb['eccentricity'] < threshold_eccentricity
-        
         if threshold_flux is not None:
             fltr &= tb['segment_flux'] < threshold_flux
 
@@ -1550,7 +1755,6 @@ class Image(object):
                     else:
                         ax.axis('off')
 
-
     def get_psf_profile(self, enclosed_energy=0.99, plot=False, axs=None,
                         xscale='linear', yscale='linear'):
         '''
@@ -1584,6 +1788,7 @@ class Image(object):
         f_rp = interpolate.interp1d(rp_norm, r_rp_pix)
         fwhm_pix = f_rp(0.5) * 2
         fwhm_as = fwhm_pix * self._pxs
+
         assert (enclosed_energy > 0) & (enclosed_energy < 1), 'Out of range!'
 
         radii = np.arange(1, ny)
@@ -1651,7 +1856,6 @@ class Image(object):
             axu.minorticks_on()
             axu.set_xscale(xscale)
 
-
     def gen_segment_inner(self, detect_thres=5., xmatch_radius=3.,
                           threshold_plx=2, threshold_gmag=None,
                           mask_radius=None, center_radius=5.,
@@ -1695,6 +1899,7 @@ class Image(object):
         # initial detection
         daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_fwhm_pix)
         sources = daofind(self._data_subbkg, mask=~self._mask_galaxy_inner)
+
         segm_data = np.zeros_like(self._data_subbkg, dtype=int)
 
         # Gaia Xmatch
@@ -1778,7 +1983,6 @@ class Image(object):
             ax.set_ylim(ylim)
             ax.set_title('Inner segmentation', fontsize=18)
 
-
     def gen_target_mask(self, threshold, npixels=12, mask=None, connectivity=8,
                         kernel_fwhm=3, expand_factor=1, bounds: list = None,
                         plot=False, fig=None, axs=None, norm_kwargs=None,
@@ -1822,7 +2026,7 @@ class Image(object):
             Use the interactive plot if True.
         verbose : bool (default: True)
             Show details if True.
-        
+
         Notes
         -----
         [SGJY added]
@@ -1853,7 +2057,6 @@ class Image(object):
         self._segment_map = smap
         self._data_convolved = cdata
 
-
     def load_psf_data(self, filename, oversample=None, extension=0):
         '''
         Load the PSF data from a FITS file.
@@ -1880,7 +2083,6 @@ class Image(object):
                 oversample = self._pxs / pscale
 
         self._psf_oversample = oversample
-
 
     def plot_psf(self, fig=None, axs=None, norm_kwargs=None, xscale='linear',
                  yscale='linear'):
@@ -1952,7 +2154,6 @@ class Image(object):
         ax.yaxis.set_label_position("right")
         ax.set_xlabel('Radius (arcsec)', fontsize=24)
         ax.set_title('Curve of growth', fontsize=18)
-
 
     def plot_summary(self, fig=None, axs=None, norm_kwargs=None,
                      interactive=False, verbose=False):
@@ -2230,7 +2431,7 @@ class Image(object):
                 fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
                 fig.subplots_adjust(wspace=0.05, hspace=0.08)
             else:
-                mask |= self._mask_coverage
+                assert fig is not None, 'Please provide fig together with axs!'
 
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
@@ -2288,7 +2489,6 @@ class Image(object):
             else:
                 ax.set_title('Edge segmentation (updated)', fontsize=18)
 
-
     def reset_mask_manual(self):
         '''
         Set the mask_manual to None.
@@ -2298,7 +2498,6 @@ class Image(object):
         [SGJY added]
         '''
         self._mask_manual = None
-
 
     def scale_rebin_mask(self, mask, plot=False, norm_kwargs=None, verbose=False):
         '''
@@ -2335,7 +2534,6 @@ class Image(object):
             ax = axs[1]
             ax.imshow(mask_s, origin='lower', cmap='Greys_r')
         return mask_s
-
 
     def save(self, filename, comprehensive=False, overwrite=False):
         '''
@@ -2388,7 +2586,6 @@ class Image(object):
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
 
-
     def save_mask(self, filename, mask_name, overwrite=False):
         '''
         Save the masks.
@@ -2411,7 +2608,6 @@ class Image(object):
 
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
-
 
     def set_mask_coverage(self, mask=None, shape='rect', mask_kwargs=None,
                           plot=False, fig=None, axs=None, norm_kwargs=None,
@@ -2457,6 +2653,7 @@ class Image(object):
             else:
                 raise KeyError(f'Cannot recognize the shape ({shape})')
             mask = ~mask
+
         self._mask_coverage = mask
 
         if plot:
@@ -2482,17 +2679,16 @@ class Image(object):
 
             ax = axs[0]
             ax.imshow(self._data, origin='lower', cmap='Greys_r', norm=norm)
-            xlim = ax.get_xlim()
+            xlim = ax.get_xlim();
             ylim = ax.get_ylim()
             plot_mask_contours(mask, ax=ax, verbose=verbose, color='cyan', lw=0.5)
-            ax.set_xlim(xlim)
+            ax.set_xlim(xlim);
             ax.set_ylim(ylim)
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
             ax.imshow(mask, origin='lower', cmap='Greys_r')
             ax.set_title('Coverage mask', fontsize=18)
-
 
     def set_psf_sizes(self, fwhm: float = None, enclose_radius: float = None):
         '''
@@ -2512,7 +2708,6 @@ class Image(object):
         if enclose_radius is not None:
             self._psf_enclose_radius = enclose_radius
             self._psf_enclose_radius_pix = enclose_radius / self._pxs
-
 
     def __repr__(self):
         '''
@@ -2559,7 +2754,6 @@ class Atlas(object):
         self._dec_deg = c_sky.dec.deg
         self._n_image = len(self._image_list)
 
-
     def adapt_masks(self, filename, interpolate_scale=None, plot=False,
                     fig=None, axs=None, norm_kwargs=None, verbose=False):
         '''
@@ -2603,7 +2797,6 @@ class Atlas(object):
 
             img.adapt_to(img_ref, plot=plot, verbose=verbose)
 
-
     def gen_photometry_aperture(self, filename):
         hdul = fits.open(filename)
         header = hdul[0].header
@@ -2627,7 +2820,6 @@ class Atlas(object):
         aper = EllipticalAperture((x, y), sma, smb, pa)
 
         return aper
-
 
     def aperture_photometry(self, aperture, mask=None, rannu_in=1.25,
                             rannu_out=1.6,
@@ -2713,7 +2905,6 @@ class Atlas(object):
             else:
                 ax.legend(loc='lower left', bbox_to_anchor=(0, 1), fontsize=16, ncols=2, handlelength=1)
 
-
     def clean_image(self, image_index: int = None, model_box_size=None,
                     model_filter_size=3, skip_reduction=False, plot=False,
                     fig=None, axs=None, norm_kwargs=None, interactive=False,
@@ -2789,7 +2980,6 @@ class Atlas(object):
                 self.plot_single_image(image_index, fig=fig, axs=axs, verbose=verbose,
                                        norm_kwargs=norm_kwargs, interactive=False)
 
-
     def match_image(self, psf_fwhm, image_size, pixel_scale=None,
                     plot=False, progress_bar=False, verbose=False):
         '''
@@ -2821,7 +3011,6 @@ class Atlas(object):
 
         if plot:
             self.plot_atlas(ncols=3, data_type='data_match', show_info='size', show_units='arcmin', interactive=False)
-
 
     def gen_mask_contaminant(self, image_index: int = None, expand_inner=1,
                              expand_edge=1, expand_outer=1, plot=False,
@@ -2917,7 +3106,6 @@ class Atlas(object):
                                      norm_kwargs=norm_kwargs,
                                      interactive=interactive, verbose=verbose)
 
-
     def plot_atlas(self, ncols=1, data_type='data', show_info: str = None,
                    show_units: str = None, show_mask_target=False, text_kwargs=None, fig=None, axs=None,
                    norm_kwargs=None, interactive=False, verbose=False):
@@ -3002,7 +3190,6 @@ class Atlas(object):
                         ax.text(0.05, 0.05, f'Size: ({size_x:.0f}, {size_y:.0f}) arcsec',
                                 transform=ax.transAxes, va='bottom', ha='left', **text_kwargs)
 
-
     def plot_single_image(self, image_index, fig=None, axs=None,
                           norm_kwargs=None, interactive=False, verbose=False):
         '''
@@ -3057,7 +3244,6 @@ class Atlas(object):
         ax.imshow(img._data_clean, origin='lower', cmap='Greys_r', norm=norm)
         ax.set_title('Cleaned image', fontsize=18)
 
-
     def remove_background(self, box_fraction=0.02, filter_size=3, verbose=False):
         '''
         Remove the background.
@@ -3069,7 +3255,6 @@ class Atlas(object):
             box_size = int(img._shape[0] * box_fraction)
             img.gen_model_background(box_size=box_size, filter_size=filter_size)
             img.background_subtract2()
-
 
     def set_mask_coverage(self, image_index, mask=None, shape='rect', mask_kwargs=None,
                           plot=False, fig=None, axs=None, norm_kwargs=None,
@@ -3113,7 +3298,6 @@ class Atlas(object):
                               plot=plot, fig=fig, axs=axs, norm_kwargs=norm_kwargs,
                               interactive=interactive, verbose=verbose)
 
-
     def set_mask_match(self, mask, mask_type='mask_target', input_wcs=None, verbose=False):
         '''
         Set the mask of the matched data.
@@ -3137,7 +3321,6 @@ class Atlas(object):
 
         setattr(self, f'_{mask_type}', mask)
 
-
     def __getitem__(self, key):
         '''
         Get the item of the image list.
@@ -3153,849 +3336,8 @@ class Atlas(object):
         '''
         return self._image_list[key]
 
-
     def __len__(self):
         '''
         Get the length of the image list.
         '''
         return self._n_image
-
-
-class Atlas_deprecated(object):
-    '''
-    An atlas of images. Again, for the moment, we assume that there is only one
-    science target in each image.
-    '''
-    def __init__(self, filenames:list, coord_sky:tuple, telescope_list:list=None, 
-                 band_list:list=None, verbose=True):
-        '''
-        Parameters
-        ----------
-        filenames : list
-            List of filenames.
-        coord_sky : tuple
-            Sky coordinate of the target, (deg, deg) or (hms, dms)
-        '''
-        self._image_list = []
-        for loop, f in enumerate(filenames):
-            if telescope_list is not None:
-                tel = telescope_list[loop]
-            else:
-                tel = None
-            
-            if band_list is not None:
-                band = band_list[loop]
-            else:
-                band = None
-
-            self._image_list.append(Image(filename=f, coord_sky=coord_sky, 
-                                          telescope=tel, band=band, 
-                                          verbose=verbose))
-
-        self._coord_sky = coord_sky
-        c_sky = read_coordinate(coord_sky[0], coord_sky[1])
-        self._ra_deg = c_sky.ra.deg
-        self._dec_deg = c_sky.dec.deg
-        self._n_image = len(self._image_list)
-    
-
-    def adapt_masks(self, filename, interpolate_scale=None, plot=False, 
-                    fig=None, axs=None, norm_kwargs=None, verbose=False):
-        '''
-        Adapt the masks and segmentations from a FITS file.
-
-        Parameters
-        ----------
-        filename : string
-            The FITS file name of the reference data with masks and 
-            segmentations.
-        interpolate_scale (optional) : float
-            The scale to interpolate the data across the mask, units: arcsec.
-        plot : bool (default: False)
-            Plot the results if True.
-        fig : Matplotlib Figure
-            The figure to plot.
-        axs : Matplotlib Axes
-            The axes to plot. Two panels are needed.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-        interactive : bool (default: False)
-            Use the interactive plot if True.
-        verbose : bool (default: True)
-            Show details if True.
-        '''
-        img_ref = Image(filename, verbose=verbose)
-
-        assert hasattr(img_ref, '_psf_enclose_radius'), \
-            'The psf_enclose_radius is required for a reference image file.'
-
-        # The scale to interpolate mask
-        if interpolate_scale is None:
-            # Take the PSF scale of the reference image if interpolate_scale is not specified
-            self._mask_interpolate_scale = img_ref._psf_enclose_radius
-        else:
-            self._mask_interpolate_scale = interpolate_scale
-
-        for loop, img in enumerate(self._image_list):
-            if verbose:
-                print(f'[adapt_masks] image {loop}: {img}')
-
-            img.adapt_to(img_ref, plot=plot, verbose=verbose)
-
-
-    def aperture_photometry(self, aperture, mask=None, rannu_in=1.25, 
-                            rannu_out=1.6, plot=False, ncols=1, axs=None, 
-                            norm_kwargs=None, text_kwargs=None):
-        '''
-        Aperture photometry of the matched images.
-
-        Parameters
-        ----------
-        aperture : EllipticalAperture
-            The elliptical aperture to measure the image.
-        mask (optional) : 2D array
-            The mask of the contaminants.
-        rannu_in, rannu_out : float (default: 1.25, 1.60)
-            The inner and outer annulus semimajor axes, units: pixel. The values 
-            follow Clark et al. (2017).
-        plot : bool (default: False)
-            Plot the results.
-        ncols : int (default: 1)
-            The number panels in each row.
-        ax : Axis
-            The axis to plot.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-        text_kwargs (optional) : dict
-            The keywords of the text.
-        '''
-        if plot:
-            if axs is None:
-                nrows = int(np.ceil(self._n_image / ncols))
-                fig, axs = plt.subplots(nrows, ncols, figsize=(5*ncols, 5*nrows))
-                axs = axs.flatten()
-                fig.subplots_adjust(wspace=0.05, hspace=0.05)
-
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-
-            if text_kwargs is None:
-                text_kwargs = dict(fontsize=16, color='cyan')
-            else:
-                assert 'transform' not in text_kwargs
-                assert ('va' not in text_kwargs) | ('verticalalignment' not in text_kwargs)
-                assert ('ha' not in text_kwargs) | ('horizontalalignment' not in text_kwargs)
-
-
-        phot_list = []
-        for loop, image in enumerate(self._data_match):
-            if plot:
-                ax = axs[loop]
-                ax.set_xticklabels([])
-                ax.set_yticklabels([])
-
-                img = self._image_list[loop]
-                ax.text(0.05, 0.95, f'[{loop}] {img._telescope}-{img._band}', 
-                        ha='left', va='top', transform=ax.transAxes, **text_kwargs)
-            else:
-                ax = None
-
-            flux = image_photometry(image, aperture, mask, rannu_in=rannu_in, 
-                                    rannu_out=rannu_out, plot=plot, ax=ax, 
-                                    norm_kwargs=norm_kwargs)
-            
-            if loop > 0:
-                ax.get_legend().remove()
-            else:
-                ax.legend(loc='lower left', bbox_to_anchor=(0, 1), fontsize=16, ncols=2, handlelength=1)
-
-
-    def clean_image(self, image_index:int=None, model_box_size=None, 
-                    model_filter_size=3, skip_reduction=False, plot=False, 
-                    fig=None, axs=None, norm_kwargs=None, interactive=False, 
-                    verbose=False):
-        '''
-        Clean up the contaminants in the image.
-        '''
-        if image_index == None:
-            n_image = self._n_image
-        else:
-            n_image = 1
-
-        if skip_reduction:
-            for loop, img in enumerate(self._image_list):
-                assert hasattr(img, '_data_subbkg'), \
-                    f'Image {loop} ({img}) does not have _data_subbkg'
-                assert hasattr(img, '_mask_contaminant'), \
-                    f'Image {loop} ({img}) does not have _mask_contaminant'
-                assert hasattr(img, '_data_clean'), \
-                    f'Image {loop} ({img}) does not have _data_clean'
-        else:
-            if model_box_size is None:
-                model_box_size = int(self._mask_interpolate_scale)
-            
-            if image_index == None:
-                for loop, img in enumerate(self._image_list):
-                    if verbose:
-                        print(f'[clean_image] model image {loop}: {img}')
-
-                    # Convert the box size into pixel units for each image
-                    model_box_size_pix = int(model_box_size / img._pxs)
-
-                    img.gen_model_galaxy(box_size=model_box_size_pix, 
-                                         filter_size=model_filter_size, 
-                                         plot=False)
-
-                    if verbose:
-                        print(f'[clean_image] clean image {loop}: {img}')
-
-                    img.gen_image_clean(plot=False)
-            else:
-                img = self._image_list[image_index]
-        
-        if plot:
-            if interactive:
-                ipy = get_ipython()
-                ipy.run_line_magic('matplotlib', 'tk')
-
-                def on_close(event):
-                    ipy.run_line_magic('matplotlib', 'inline')
-
-            if axs is None:
-                fig, axs = plt.subplots(n_image, 3, figsize=(15, n_image*5))
-                fig.subplots_adjust(wspace=0.03, hspace=0.1)
-            else:
-                assert fig is not None, 'Please provide fig together with axs!'
-
-            if interactive:
-                fig.canvas.mpl_connect('close_event', on_close)
-
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-
-            if image_index == None:
-                for loop in range(n_image):
-                    self.plot_single_image(loop, fig=fig, axs=axs[loop, :], verbose=verbose, 
-                                           norm_kwargs=norm_kwargs, interactive=False) 
-            else:
-                self.plot_single_image(image_index, fig=fig, axs=axs, verbose=verbose, 
-                                       norm_kwargs=norm_kwargs, interactive=False)
-
-
-    def match_image(self, psf_fwhm, image_size, pixel_scale=None, 
-                    plot=False, progress_bar=False, verbose=False):
-        '''
-        Generate the matched images.
-
-        Parameters
-        ----------
-        psf_fwhm : float
-            The PSF FWHM, units: arcsec
-        image_size : float
-            The size of the output image, units: arcsec
-        pixel_scale (optional) : float
-            The output pixel scale, units: arcsec. If not provided, half of 
-            the psf_fwhm will be used to ensure the Nyquist sampling.
-        progress_bar : bool (default: False)
-            The progress of the processed images.
-        verbose : bool (default: False)
-            Print details if True.
-        '''
-        images, output_wcs = gen_images_matched(self, psf_fwhm, image_size=image_size, 
-                                                pixel_scale=pixel_scale, 
-                                                progress_bar=progress_bar, 
-                                                verbose=verbose)
-        
-        self._data_match = images
-        self._wcs_match = output_wcs
-        self._pxs_match = np.abs(output_wcs.wcs.cdelt[0]) * 3600
-        self._shape_match = output_wcs.pixel_shape
-
-        if plot:
-            self.plot_atlas(ncols=3, data_type='data_match', show_info='size', show_units='arcmin', interactive=False)
-
-
-    def gen_mask_contaminant(self, image_index:int=None, expand_inner=1, 
-                             expand_edge=1, expand_outer=1, plot=False, 
-                             fig=None, axs=None, norm_kwargs=None, 
-                             interactive=False, verbose=False):
-        '''
-        Generate the contaminant mask.
-
-        Parameters
-        ----------
-        image_index (optional) : int
-            The index of the image to generate the mask_contaminant. Work on all 
-            images in the list if None.
-        expand_inner : float (default: 1)
-            The expand_factor of the inner mask.
-        expand_edge : float (default: 1.2)
-            The expand_factor of the edge mask.
-        expand_outer : float (default: 1.2)
-            The expand_factor of the outer mask.
-        plot : bool (default: False)
-            Plot the image and mask if True.
-        fig : Matplotlib Figure
-            The figure to plot.
-        axs : Matplotlib Axes
-            The axes to plot. Two panels are needed.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-        interactive : bool (default: False)
-            Use the interactive plot if True.
-        verbose : bool (default: True)
-            Show details if True.
-        '''
-        if image_index == None:
-            n_image = self._n_image
-        else:
-            n_image = 1
-
-        if plot:
-            if interactive:
-                ipy = get_ipython()
-                ipy.run_line_magic('matplotlib', 'tk')
-
-                def on_close(event):
-                    ipy.run_line_magic('matplotlib', 'inline')
-
-            if axs is None:
-                fig, axs = plt.subplots(n_image, 2, figsize=(10, n_image*5))
-                fig.subplots_adjust(wspace=0.03, hspace=0.1)
-
-                if n_image == 1:
-                    img = self._image_list[image_index]
-                    axs[1].sharex(axs[0])
-                    axs[1].sharey(axs[0])
-                    axs[0].set_xticklabels([])
-                    axs[0].set_yticklabels([])
-                    axs[0].set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
-                else:
-                    for loop, img in enumerate(self._image_list):
-                        axs[loop, 1].sharex(axs[loop, 0])
-                        axs[loop, 1].sharey(axs[loop, 0])
-                        axs[loop, 0].set_xticklabels([])
-                        axs[loop, 0].set_yticklabels([])
-                        axs[loop, 0].set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
-
-            else:
-                assert fig is not None, 'Please provide fig together with axs!'
-
-            if interactive:
-                fig.canvas.mpl_connect('close_event', on_close)
-
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-
-        if image_index == None:
-            for loop, img in enumerate(self._image_list):
-                if plot:
-                    axs_u = axs[loop, :]
-                else:
-                    axs_u = None
-
-                img.gen_mask_contaminant(expand_inner=expand_inner, 
-                                         expand_edge=expand_edge, 
-                                         expand_outer=expand_outer, plot=plot, 
-                                         fig=fig, axs=axs_u, 
-                                         norm_kwargs=norm_kwargs, 
-                                         interactive=False, verbose=verbose)
-        else:
-            img = self._image_list[image_index]
-            img.gen_mask_contaminant(expand_inner=expand_inner, 
-                                     expand_edge=expand_edge, 
-                                     expand_outer=expand_outer, plot=plot, 
-                                     fig=fig, axs=axs, 
-                                     norm_kwargs=norm_kwargs, 
-                                     interactive=interactive, verbose=verbose)
-
-
-    def plot_atlas(self, ncols=1, data_type='data', show_info:str=None, 
-                   show_units:str=None, show_mask_target=False, text_kwargs=None, fig=None, axs=None, 
-                   norm_kwargs=None, interactive=False, verbose=False):
-        '''
-        Plot the image atlas.
-        '''
-        if interactive:
-            ipy = get_ipython()
-            ipy.run_line_magic('matplotlib', 'tk')
-
-            def on_close(event):
-                ipy.run_line_magic('matplotlib', 'inline')
-
-        nrows = int(np.ceil(self._n_image / ncols))
-
-        if axs is None:
-            fig, axs = plt.subplots(nrows, ncols, figsize=(5*ncols, 5*nrows))
-            axs = axs.flatten()
-            fig.subplots_adjust(wspace=0.05, hspace=0.05)
-        else:
-            assert fig is not None, 'Please provide fig together with axs!'
-
-        if interactive:
-            fig.canvas.mpl_connect('close_event', on_close)
-
-        if norm_kwargs is None:
-            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-        
-        if text_kwargs is None:
-            text_kwargs = dict(fontsize=16, color='cyan')
-        else:
-            assert 'transform' not in text_kwargs
-            assert ('va' not in text_kwargs) | ('verticalalignment' not in text_kwargs)
-            assert ('ha' not in text_kwargs) | ('horizontalalignment' not in text_kwargs)
-
-        for loop, ax in enumerate(axs):
-            if loop >= self._n_image:
-                ax.axis('off')
-                continue
-            
-            img = self._image_list[loop]
-
-            # The matched data are saved separately in Atlas
-            if data_type == 'data_match':
-                x = self._data_match[loop]
-                pixel_scale = self._pxs_match
-            else:
-                x = getattr(img, f'_{data_type}', None)
-                assert x is not None, f'Cannot find the data type ({data_type})!'
-                pixel_scale = img._pxs
-
-            norm = simple_norm(x, **norm_kwargs)
-            ax.imshow(x, origin='lower', cmap='Greys_r', norm=norm)
-            ax.set_xticklabels([])
-            ax.set_yticklabels([])
-            ax.text(0.05, 0.95, f'[{loop}] {img._telescope}-{img._band}', 
-                    ha='left', va='top', transform=ax.transAxes, **text_kwargs)
-            
-            if show_mask_target:
-                assert hasattr(self, '_mask_target'), 'Please use set_mask_match() to set a mask first!'
-                xlim = ax.get_xlim(); ylim = ax.get_ylim()
-                plot_mask_contours(self._mask_target, ax=ax, color='magenta', lw=0.5)
-                ax.set_xlim(xlim)
-                ax.set_ylim(ylim)
-
-            if show_info is not None:
-                if show_info == 'shape':
-                    ax.text(0.05, 0.05, f'Shape: {x.shape}', ha='left', 
-                            va='bottom', transform=ax.transAxes, **text_kwargs)
-
-                if show_info == 'size':
-                    if show_units is not None:
-                        size_y, size_x = np.array(x.shape) * pixel_scale * units.arcsec
-                        size_x = size_x.to_value(show_units)
-                        size_y = size_y.to_value(show_units)
-
-                        ax.text(0.05, 0.05, f'Size: ({size_x:.0f}, {size_y:.0f}) {show_units}', 
-                                transform=ax.transAxes, va='bottom', ha='left', **text_kwargs)
-                    else:
-                        size_y, size_x = np.array(x.shape) * pixel_scale
-                        ax.text(0.05, 0.05, f'Size: ({size_x:.0f}, {size_y:.0f}) arcsec', 
-                                transform=ax.transAxes, va='bottom', ha='left', **text_kwargs)
-
-
-    def plot_single_image(self, image_index, fig=None, axs=None, 
-                          norm_kwargs=None, interactive=False, verbose=False): 
-        '''
-        Plot single images.
-        '''
-        img = self._image_list[image_index]
-
-        if interactive:
-            ipy = get_ipython()
-            ipy.run_line_magic('matplotlib', 'tk')
-
-            def on_close(event):
-                ipy.run_line_magic('matplotlib', 'inline')
-
-        if axs is None:
-            fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-            fig.subplots_adjust(wspace=0.05, hspace=0.05)
-        else:
-            assert fig is not None, 'Please provide fig together with axs!'
-
-        if interactive:
-            fig.canvas.mpl_connect('close_event', on_close)
-
-        if norm_kwargs is None:
-            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-
-        ax = axs[0]
-        norm = simple_norm(img._data_subbkg, **norm_kwargs)
-        ax.imshow(img._data_subbkg, origin='lower', cmap='Greys_r', norm=norm)
-        xlim = ax.get_xlim(); ylim = ax.get_ylim()
-        plot_mask_contours(img._mask_outer, ax=ax, verbose=verbose, color='C0', lw='0.5')
-        plot_mask_contours(img._mask_edge, ax=ax, verbose=verbose, color='C1', lw='0.5')
-        plot_mask_contours(img._mask_inner, ax=ax, verbose=verbose, color='C2', lw='0.5')
-        ax.set_xlim(xlim); ax.set_ylim(ylim)
-        ax.set_title('Image', fontsize=18)
-        ax.set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-
-        ax = axs[1]
-        ax.sharex(axs[0])
-        ax.sharey(axs[0])
-        ax.imshow(img._model_galaxy, origin='lower', cmap='Greys_r', norm=norm)
-        ax.set_title('Model galaxy', fontsize=18)
-                
-        ax = axs[2]
-        ax.sharex(axs[0])
-        ax.sharey(axs[0])
-        norm = simple_norm(img._data_clean, **norm_kwargs)
-        ax.imshow(img._data_clean, origin='lower', cmap='Greys_r', norm=norm)
-        ax.set_title('Cleaned image', fontsize=18)
-
-    
-    def remove_background(self, box_fraction=0.02, filter_size=3, verbose=False):
-        '''
-        Remove the background.
-        '''
-        for loop, img in enumerate(self._image_list):
-            if verbose:
-                print(f'[remove_background] image {loop}: {img}')
-
-            box_size = int(img._shape[0] * box_fraction)
-            img.gen_model_background(box_size=box_size, filter_size=filter_size)
-            img.background_subtract2()
-    
-
-    def set_mask_coverage(self, image_index, mask=None, shape='rect', mask_kwargs=None, 
-                          plot=False, fig=None, axs=None, norm_kwargs=None, 
-                          interactive=False, verbose=False):
-        '''
-        Set the coverage mask.
-
-        Parameters
-        ----------
-        image_index : int
-            The index of the image.
-        mask (optional) : bool
-            The coverage mask with True indicate pixels to be discarded. One can 
-            manually define the coverage mask with this input.
-        shape : string (default: 'rect')
-            The shape of the predefined mask with True indicate pixels to be 
-            discarded. The predefined shapes are circular ('circ') and 
-            rectangular ('rect').
-        mask_kwargs (optional) : dict
-            The parameters of the predefined shape function.
-            'circ' : x, y, radius
-                x, y : The center pixel coordinate of the circle.
-                radius : The radius of the circle, units: pixel.
-            'rect' : xmin, xmax, ymin, ymax
-                The ranges of x and y axes.
-        plot : bool (default: False)
-            Plot the image and the mask if True.
-        fig : Matplotlib Figure
-            The figure to plot.
-        axs : Matplotlib Axes
-            The axes to plot. Two panels are needed.
-        norm_kwargs (optional) : dict
-            The keywords to normalize the data image.
-        interactive : bool (default: False)
-            Use the interactive plot if True.
-        verbose : bool (default: True)
-            Show details if True.
-        '''
-        img = self._image_list[image_index]
-        img.set_mask_coverage(mask, shape=shape, mask_kwargs=mask_kwargs, 
-                          plot=plot, fig=fig, axs=axs, norm_kwargs=norm_kwargs, 
-                          interactive=interactive, verbose=verbose)
-
-
-    def set_mask_match(self, mask, mask_type='mask_target', input_wcs=None, verbose=False):
-        '''
-        Set the mask of the matched data.
-
-        Parameters
-        ----------
-        mask : 2D array
-            Input mask
-        mask_type : string
-            The type of the mask, 'mask_target' or 'mask_contaminant'.
-        input_wcs (optional) : WCS
-            The input WCS. If specified, the mask will be reprojected to match 
-            the Atlas's WCS.
-        verbose : bool (default: True)
-            Show details if True.
-        '''
-        assert mask_type in ['mask_target', 'mask_contaminant'], f'Cannot find the mask type ({mask_type})!'
-
-        if input_wcs is not None:
-            mask = adapt_mask(mask, input_wcs, self._wcs_match, self._shape_match, verbose=verbose)
-        
-        setattr(self, f'_{mask_type}', mask)
-
-
-    def __getitem__(self, key):
-        '''
-        Get the item of the image list.
-
-        Parameters
-        ----------
-        key : int
-            The index of the image list.
-
-        Notes
-        -----
-        FIXME: We can make it more useful.
-        '''
-        return self._image_list[key]
-
-
-    def __len__(self):
-        '''
-        Get the length of the image list.
-        '''
-        return self._n_image
-
-
-class Atlas_deprecated(object):
-    '''
-    An atlas of images. Again, for the moment, we assume that there is only one 
-    science target in each image.
-    '''
-
-    def __init__(self, target_coordinate, image_list, header_list, name_list):
-        '''
-        Parameters
-        ----------
-        image_list : list
-            A list of images (2d array).
-        name_list: list
-            a list of names (strings).
-        '''
-        self._image_list = image_list
-        self._header_list = header_list
-        self._name_list = name_list
-        self._ra, self._dec = target_coordinate
-        self._coord = None
-        self._dict = {  # wavelength(um), pixel size(asec), psf fwhm(asec)
-            'GALEX': {'FUV': (0.1528, 3.2, 4.3), 'NUV': (0.2271, 3.2, 5, 3)},
-            'SDSS': {'u': (0.3551, 0.45, 1.3), 'g': (0.4686, 0.45, 1.3), 'r': (0.6166, 0.45, 1.3),
-                     'i': (0.7480, 0.45, 1.3), 'z': (0.8932, 0.45, 1.3)},
-            '2MASS': {'J': (1.25, 1., 2.), 'H': (1.65, 1., 2.), 'Ks': (2.16, 1., 2.)},
-            'WISE': {'3.4': (3.4, 1.375, 6.1), '4.6': (4.6, 1.375, 6.4), '12': (12., 1.375, 6.5),
-                     '22': (22., 1.375, 12)}
-        }
-        self._id = None
-        self._telescope_list = []
-        self._filter_list = []
-        self._wavelength_list = []
-        self._pxs_list = []
-        self._fwhm_list = []
-        for i in range(len(name_list)):
-            name = name_list[i].strip()
-            name_temp = name.split('_')
-            if not self._id:
-                self._id = name_temp[0][3:]
-            telescope_temp = name_temp[1]
-            filter_temp = name_temp[2]
-            self._telescope_list.append(telescope_temp)
-            self._filter_list.append(filter_temp)
-            self._wavelength_list.append(self._dict[telescope_temp][filter_temp][0])
-            self._pxs_list.append(self._dict[telescope_temp][filter_temp][1])
-            self._fwhm_list.append(self._dict[telescope_temp][filter_temp][2])
-
-            self._header = None
-            self._fwhm = None
-            self._image_list_mathced = None
-            self._circular_measurement = None
-
-    def match_images(self, match_header=None, make_fits=True):
-        '''
-        Get a new list of images with matched resolution, pixel scale, and size.
-        Parameter
-        -----------
-        match_header: optional
-            If 'None', it will use the 2MASS header to match.
-        Return
-        ---------
-        a list
-        Containing a series of 2d array.
-        '''
-        # match resolution
-        new_img_list = self._image_list
-        header_list = self._header_list
-        fwhm_list = self._fwhm_list
-        pixel_size = self._pxs_list
-        wavelength = self._wavelength_list
-        sigma_list = [i / (2 * sqrt(2 * log(2))) for i in fwhm_list]
-        sigma_kernel = [sqrt(max(sigma_list) ** 2 - sigma_list[i] ** 2) for i in range(len(sigma_list))]
-        sigma_kernel_pixel = [sigma_kernel[i] / pixel_size[i] for i in range(len(sigma_kernel))]
-        conv_img_list = []
-        #  fwhm_pixel = [fwhm_list[i] / pixel_size[i] for i in range(len(fwhm_list))]
-        size = []
-        for i in range(len(sigma_kernel_pixel)):
-            if ceil(sigma_kernel_pixel[i]) % 2 == 0:
-                size.append(ceil(sigma_kernel_pixel[i]) + 1)
-            else:
-                size.append(ceil(sigma_kernel_pixel[i]))
-        for i in range(len(new_img_list)):
-            if sigma_kernel[i] == 0.:
-                conv_img_list.append(new_img_list[i])
-                continue
-            kernel = make_2dgaussian_kernel((2 * sqrt(2 * log(2))) * sigma_kernel_pixel[i], size=3 * size[i])
-            convolved_data = convolve(new_img_list[i], kernel)
-            conv_img_list.append(convolved_data)
-        # reproject
-        if not match_header:
-            for i in range(len(header_list)):
-                if header_list[i]['TELESCOP'].split('/').strip() == '2MASS':
-                    match_header = header_list[i]
-                    break
-        else:
-            match_header = match_header
-        rpj_img_list = []
-        for i in range(len(conv_img_list)):
-            array, _ = reproject_adaptive((conv_img_list[i], WCS(header_list[i])),
-                                          WCS(match_header), shape_out=(match_header['NAXIS1'], match_header['NAXIS2']),
-                                          kernel='gaussian', conserve_flux=True, boundary_mode='ignore')
-            rpj_img_list.append(array)
-
-        self._image_list_mathced = rpj_img_list
-        self._header = match_header  # um
-        self._fwhm = max(fwhm_list)
-
-        if make_fits:
-            os.makedirs('matched_images')
-            for i in range(len(new_img_list)):
-                tele_name = self._telescope_list[i]
-                filt_name = self._filter_list[i]
-                hdu_pri = fits.PrimaryHDU(rpj_img_list[i], header=match_header)
-                hdul_new = fits.HDUList([hdu_pri])
-                hdul_new.writeto('matched_images/NGC{}_{}_{}_matched.fits'.format(str(self._id), tele_name, filt_name),
-                                 overwrite=True)
-
-    def get_error(self, r=(10, 20, 30, 40, 50, 60), nexample=50, mask_radius=None):
-        '''
-        Get the relationship between log10(std) and log10(area).
-        Parameter
-        -----------
-        r: tuple. optional.
-            Contain the radius of circular samples. pixels.
-        nexample: int.
-            The number of sampling.
-
-        self._error_log_line
-        -------------
-        The function of log10(std) and log10(area). ('asec')
-        '''
-        img_list_matched = self._image_list_mathced
-        header = self._header
-        self._coord = read_coordinate(self._ra, self._dec)
-        w = WCS(header)
-        xc, yc = w.world_to_pixel(self._coord)
-
-        mask = np.zeros(np.shape(img_list_matched[0]))
-        ra = int(mask_radius)
-        for a in range(-ra, ra + 1):
-            for b in range(-ra, ra + 1):
-                if sqrt(a ** 2 + b ** 2) <= ra:
-                    mask[int(yc) + b, int(xc) + a] = True
-        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
-        fitted_line_list = []
-        for k in range(len(img_list_matched)):
-            error_list = []
-            for rr in r:
-                error_list.append(circular_error_estimate(img_list_matched[k], mask, rr, nexample, percent=99.))
-            line_init = models.Linear1D()
-            r_list = [(rr * pxs) for rr in r]  # world r.
-            area_list = [(np.pi * rr ** 2) for rr in r_list]
-            fit = fitting.LinearLSQFitter()
-            x_fit = [log10(i) for i in area_list]
-            y_fit = [log10(j) for j in error_list]
-            fitted_line = fit(line_init, x_fit, y_fit)
-            fitted_line_list.append(fitted_line)
-        self._error_log_line_list = fitted_line_list
-
-    def circular_measurement(self, radius, a_v):
-        '''
-        Do the circular measurement.
-        radius: float
-            The max radius for measurement, which must containing all the flux. 'asec'
-        a_v: float.
-            The a_v for galactic extinction.
-            https://irsa.ipac.caltech.edu/applications/DUST/
-        gala_extinction: bool
-            If True, it will do the galactic extinction correction.
-
-        self._circular_measurement
-        ----------
-        A dictionary. Containing functions (input is radius in 'asec').
-        Containing the multi-band flux, and error. ('Jy')
-        '''
-        wavelength = self._wavelength_list
-        header = self._header
-        self._coord = read_coordinate(self._ra, self._dec)
-        w = WCS(header)
-        xc, yc = w.world_to_pixel(self._coord)
-        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
-
-        ra = radius / pxs
-
-        photometry_dict = {}
-
-        a_list_mag = extinction.fitzpatrick99(np.array([wv * 10000 for wv in wavelength]), a_v)
-        a_list_flux = [10 ** (mg / 2.5) for mg in a_list_mag]
-        for i in range(len(wavelength)):
-            max_radius = int(ra)
-            radii = [j for j in range(1, max_radius + 1)]
-            cog = CurveOfGrowth(self._image_list_mathced[i], (xc, yc), radii=radii)
-            h = cog.profile
-            r = cog.radius
-            r_c = [rr * pxs for rr in r]
-
-            h_c = [hh * a_list_flux[i] for hh in h]
-            flux = interpolate.interp1d(r_c, h_c)
-
-            photometry_dict[wavelength[i]] = {}
-            photometry_dict[wavelength[i]]['flux'] = flux
-
-            def mkfun(i):
-                def error_temp(xr):
-                    return a_list_flux[i] * (10 ** self._error_log_line_list[i](log10(np.pi * (xr ** 2))))
-
-                return error_temp
-
-            photometry_dict[wavelength[i]]['error'] = mkfun(i)
-        self._circular_measurement = photometry_dict
-
-    def make_catalog(self, measurement_ra, redshift=0, id=0, plot=False):
-        ref = {
-            0.1528: 'FUV', 0.2271: 'NUV', 0.3551: 'u_sdss', 0.4686: 'g_sdss', 0.6166: 'r_sdss', 0.7480: 'i_sdss',
-            0.8932: 'z_sdss', 1.25: 'J_2mass', 1.65: 'H_2mass', 2.16: 'Ks_2mass', 3.4: 'WISE1', 4.6: 'WISE2',
-            12: 'WISE3', 22: 'WISE4'
-        }
-        data = self._circular_measurement
-        k = data.keys()
-        k_list = sorted(k)
-        os.makedirs('catalog', exist_ok=True)
-
-        for r in measurement_ra:
-            f = open('catalog/{}_{}.txt'.format(id, r), 'x')
-            f.write('#id redshift ')
-            for key in k_list:
-                f.write('{} {}_err '.format(ref[key], ref[key]))
-            f.write('alpha delta mask ')
-            f.write('{} {} '.format(id, redshift))
-            for key in k_list:
-                f.write('{} {} '.format(data[key]['flux'](r) / 1000, data[key]['error'](r) / 1000))
-            f.write('26.68679 -0.67865 0 ')
-            f.close()
-        if plot:
-            for r in measurement_ra:
-                plt.plot([log10(i) for i in k_list], [log10(data[i]['flux'](r) / 1000) for i in k_list],
-                         marker='x', markersize=3, label='{} arcsec radius'.format(r), linewidth=1)
-                plt.xlabel('lg(wavelength) / μm')
-                plt.ylabel('lg(flux) / mJy')
-                plt.legend()
-
-    def __getitem__(self, items):
-        '''
-        Get the image object.
-        '''
-        if self._image_list_mathced is not None:
-            return self._image_list_mathced[items]
-        else:
-            return self._image_list[items]
