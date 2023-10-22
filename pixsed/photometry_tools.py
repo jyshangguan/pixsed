@@ -1326,9 +1326,11 @@ class Image(object):
             mb.on_close(event)
 
         # Start to work
-        mask = self._mask_contaminant
+        mask = getattr(self, '_mask_contaminant', None)
+        if mask is None:
+            mask = np.zeros_like(self._data_subbkg, dtype=bool)
 
-        if self._mask_manual is None:
+        if getattr(self, '_mask_manual', None) is None:
             self._mask_manual = np.zeros_like(mask, dtype=bool)
 
         fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
