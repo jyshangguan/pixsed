@@ -161,4 +161,6 @@ cython_debug/
 
 # Develop directory
 dev/
+
+# Mac files
 .DS_Store
