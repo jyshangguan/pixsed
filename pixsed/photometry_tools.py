@@ -1064,8 +1064,9 @@ class Image(object):
         self._segm_background = segm
 
     def gen_mask_contaminant(self, expand_inner=1, expand_edge=1.2,
-                             expand_outer=1.2, plot=False, fig=None, axs=None,
-                             norm_kwargs=None, interactive=False, verbose=False):
+                             expand_outer=1.2, expand_manual=1., plot=False, 
+                             fig=None, axs=None, norm_kwargs=None, 
+                             interactive=False, verbose=False):
         '''
         Generate the mask of all contaminants.
 
@@ -1077,6 +1078,8 @@ class Image(object):
             The expand_factor of the edge mask.
         expand_outer : float (default: 1.2)
             The expand_factor of the outer mask.
+        expand_manual : float (default: 1)
+            The expand_factor of the manual mask.
         plot : bool (default: False)
             Plot the image and mask if True.
         fig : Matplotlib Figure
@@ -1099,6 +1102,13 @@ class Image(object):
         self.gen_mask_outer(expand_factor=expand_outer, plot=False, verbose=verbose)
 
         self._mask_contaminant = self._mask_inner | self._mask_edge | self._mask_outer
+
+        # Include the manual mask if it exists
+        mask_manual = getattr(self, '_mask_manual', None)
+        if mask_manual is not None:
+            if expand_manual > 1:
+                mask_manual = scale_mask(mask_manual, factor=expand_manual)
+            self._mask_contaminant |= mask_manual 
 
         if plot:
             if interactive:
@@ -2550,9 +2560,11 @@ class Image(object):
         self._header['YCOORD'] = self._coord_pix[1]
         self._header['PSCALE'] = self._pxs
         self._header['COMMENT'] = f'Reduced by PIXSED on {now.strftime("%d/%m/%YT%H:%M:%S")}'
-        self._header['APER_SMA'] = self._phot_aper.a
-        self._header['APER_SMB'] = self._phot_aper.b
-        self._header['APER_PA'] = self._phot_aper.theta
+
+        if hasattr(self, '_phot_aper'):
+            self._header['APER_SMA'] = self._phot_aper.a
+            self._header['APER_SMB'] = self._phot_aper.b
+            self._header['APER_PA'] = self._phot_aper.theta
 
         # Primary extension
         hduList = [fits.PrimaryHDU(header=self._header)]
@@ -2566,6 +2578,10 @@ class Image(object):
         hduList.append(fits.ImageHDU(self._segment_inner.data, header=header_img, name='segment_inner'))
         hduList.append(fits.ImageHDU(self._segment_edge.data, header=header_img, name='segment_edge'))
         hduList.append(fits.ImageHDU(self._segment_outer.data, header=header_img, name='segment_outer'))
+
+        mask_manual = getattr(self, '_mask_manual', None)
+        if mask_manual is not None:
+            hduList.append(fits.ImageHDU(mask_manual.astype(int), header=header_img, name='mask_manual'))
 
         if hasattr(self, '_psf_data'):
             header_psf = fits.Header()
