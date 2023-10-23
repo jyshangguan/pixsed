@@ -2627,9 +2627,9 @@ class Image(object):
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
 
-    def set_mask_coverage(self, mask=None, shape='rect', mask_kwargs=None,
-                          plot=False, fig=None, axs=None, norm_kwargs=None,
-                          interactive=False, verbose=False):
+    def set_mask_coverage(self, mask=None, shape='rect', mask_kwargs=None, 
+                          fill_value=None, plot=False, fig=None, axs=None, 
+                          norm_kwargs=None, interactive=False, verbose=False):
         '''
         Set the field mask where the used region
 
@@ -2673,6 +2673,9 @@ class Image(object):
             mask = ~mask
 
         self._mask_coverage = mask
+
+        if fill_value is not None:
+            self._data[mask] = fill_value
 
         if plot:
             if interactive:
