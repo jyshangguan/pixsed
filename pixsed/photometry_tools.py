@@ -952,6 +952,10 @@ class Image(object):
         mask_galaxy = self._mask_galaxy
         mask_out = self._mask_outer ^ (mask_galaxy & self._mask_outer)
 
+        if hasattr(self, '_mask_coverage'):
+            mask_in[self._mask_coverage] = False
+            mask_out[self._mask_coverage] = False
+
         self._data_clean[mask_in] = self._model_galaxy[mask_in] + \
                                     self._model_galaxy_rms[mask_in] * \
                                     np.random.randn(np.sum(mask_in))
