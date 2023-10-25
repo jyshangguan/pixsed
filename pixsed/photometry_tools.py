@@ -312,6 +312,15 @@ class Image(object):
 
             if verbose:
                 print('Adapted the galaxy inner mask')
+        
+        if hasattr(other, '_mask_manual'):
+            self._mask_manual = adapt_mask(other._mask_manual,
+                                           input_wcs=input_wcs,
+                                           output_wcs=output_wcs,
+                                           shape_out=shape_out)
+
+            if verbose:
+                print('Adapted the manual mask')
 
         if hasattr(other, '_segment_inner'):
             self._segment_inner = adapt_segmentation(other._segment_inner,
@@ -2601,6 +2610,10 @@ class Image(object):
             hduList.append(fits.ImageHDU(self._mask_edge.astype(int), header=header_img, name='mask_edge'))
             hduList.append(fits.ImageHDU(self._mask_outer.astype(int), header=header_img, name='mask_outer'))
 
+            mask_coverage = getattr(self, '_mask_coverage', None)
+            if mask_coverage is not None:
+                hduList.append(fits.ImageHDU(mask_coverage.astype(int), header=header_img, name='mask_coverage'))
+
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
 
@@ -2807,6 +2820,7 @@ class Atlas(object):
 
         # The scale to interpolate mask
         if interpolate_scale is None:
+            assert hasattr(img_ref, '_psf_enclose_radius'), 'Need to provide the _psf_enclose_radius in the reference image!'
             # Take the PSF scale of the reference image if interpolate_scale is not specified
             self._mask_interpolate_scale = img_ref._psf_enclose_radius
         else:
@@ -3034,8 +3048,8 @@ class Atlas(object):
             self.plot_atlas(ncols=3, data_type='data_match', show_info='size', show_units='arcmin', interactive=False)
 
     def gen_mask_contaminant(self, image_index: int = None, expand_inner=1,
-                             expand_edge=1, expand_outer=1, plot=False,
-                             fig=None, axs=None, norm_kwargs=None,
+                             expand_edge=1, expand_outer=1, expand_manual=1, 
+                             plot=False, fig=None, axs=None, norm_kwargs=None,
                              interactive=False, verbose=False):
         '''
         Generate the contaminant mask.
@@ -3114,8 +3128,9 @@ class Atlas(object):
 
                 img.gen_mask_contaminant(expand_inner=expand_inner,
                                          expand_edge=expand_edge,
-                                         expand_outer=expand_outer, plot=plot,
-                                         fig=fig, axs=axs_u,
+                                         expand_outer=expand_outer, 
+                                         expand_manual=expand_manual,
+                                         plot=plot, fig=fig, axs=axs_u,
                                          norm_kwargs=norm_kwargs,
                                          interactive=False, verbose=verbose)
         else:
@@ -3278,8 +3293,8 @@ class Atlas(object):
             img.background_subtract2()
 
     def set_mask_coverage(self, image_index, mask=None, shape='rect', mask_kwargs=None,
-                          plot=False, fig=None, axs=None, norm_kwargs=None,
-                          interactive=False, verbose=False):
+                          fill_value=None, plot=False, fig=None, axs=None, 
+                          norm_kwargs=None, interactive=False, verbose=False):
         '''
         Set the coverage mask.
 
@@ -3315,9 +3330,10 @@ class Atlas(object):
             Show details if True.
         '''
         img = self._image_list[image_index]
-        img.set_mask_coverage(mask, shape=shape, mask_kwargs=mask_kwargs,
-                              plot=plot, fig=fig, axs=axs, norm_kwargs=norm_kwargs,
-                              interactive=interactive, verbose=verbose)
+        img.set_mask_coverage(mask, shape=shape, mask_kwargs=mask_kwargs, 
+                              fill_value=fill_value, plot=plot, fig=fig, axs=axs, 
+                              norm_kwargs=norm_kwargs, interactive=interactive, 
+                              verbose=verbose)
 
     def set_mask_match(self, mask, mask_type='mask_target', input_wcs=None, verbose=False):
         '''
