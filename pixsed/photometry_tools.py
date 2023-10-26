@@ -518,7 +518,7 @@ class Image(object):
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-    def background_subtract2(self, plot=False, norm_kwargs=None):
+    def background_subtract(self, plot=False, norm_kwargs=None):
         '''
         Remove the background of the image data.
         Parameter
@@ -1881,7 +1881,8 @@ class Image(object):
             axu.minorticks_on()
             axu.set_xscale(xscale)
 
-    def gen_segment_inner(self, detect_thres=5., xmatch_radius=3.,
+    def gen_segment_inner(self, detect_thres=5., psf_fwhm=None, 
+                          xmatch_gaia=True, xmatch_radius=3., 
                           threshold_plx=2, threshold_gmag=None,
                           mask_radius=None, center_radius=5.,
                           plot=False, fig=None, axs=None, norm_kwargs=None,
@@ -1919,10 +1920,13 @@ class Image(object):
         '''
         assert hasattr(self, '_data_subbkg'), 'Please run background_subtract() first!'
         assert hasattr(self, '_mask_galaxy_inner'), 'Please run detect_source_extended() first!'
-        assert hasattr(self, '_psf_fwhm_pix'), 'Please run get_PSF_profile() first!'
 
         # initial detection
-        daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=self._psf_fwhm_pix)
+        if psf_fwhm is None:
+            assert hasattr(self, '_psf_fwhm_pix'), 'Please specify the parameter psf_fwhm or run get_PSF_profile()!'
+            psf_fwhm = self._psf_fwhm_pix
+
+        daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=psf_fwhm)
         sources = daofind(self._data_subbkg, mask=~self._mask_galaxy_inner)
 
         segm_data = np.zeros_like(self._data_subbkg, dtype=int)
@@ -1930,24 +1934,28 @@ class Image(object):
         # Gaia Xmatch
         w = self._wcs
         if sources:
-            c = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
-            sources_world = Table([c.ra.deg, c.dec.deg, sources['xcentroid'],
-                                   sources['ycentroid']],
-                                  names=['ra', 'dec', 'x', 'y'])
-            t_o = xmatch_gaiadr3(sources_world, xmatch_radius, colRA1='ra', colDec1='dec')  # Gaia xmatch.
+            if xmatch_gaia:
+                c = w.pixel_to_world(sources['xcentroid'], sources['ycentroid'])
+                sources_world = Table([c.ra.deg, c.dec.deg, sources['xcentroid'],
+                                       sources['ycentroid']],
+                                      names=['ra', 'dec', 'x', 'y'])
+                t_o = xmatch_gaiadr3(sources_world, xmatch_radius, colRA1='ra', colDec1='dec')  # Gaia xmatch.
 
-            dist = np.sqrt((t_o['x'] - self._coord_pix[0]) ** 2 + (t_o['y'] - self._coord_pix[1]) ** 2)
-            fltr = dist > center_radius
+                dist = np.sqrt((t_o['x'] - self._coord_pix[0]) ** 2 + (t_o['y'] - self._coord_pix[1]) ** 2)
+                fltr = dist > center_radius
 
-            plx_snr = (t_o['Plx'] / t_o['e_Plx'])
-            fltr &= (plx_snr > threshold_plx)
-            if hasattr(t_o['Plx'], 'mask'):
-                fltr &= ~t_o['Plx'].mask
+                plx_snr = (t_o['Plx'] / t_o['e_Plx'])
+                fltr &= (plx_snr > threshold_plx)
+                if hasattr(t_o['Plx'], 'mask'):
+                    fltr &= ~t_o['Plx'].mask
 
-            if threshold_gmag is not None:
-                fltr &= (t_o['Gmag'] < threshold_gmag)
+                if threshold_gmag is not None:
+                    fltr &= (t_o['Gmag'] < threshold_gmag)
 
-            t_s = t_o[fltr]
+                t_s = t_o[fltr]
+            else:
+                t_s = Table([sources['xcentroid'], sources['ycentroid']], 
+                            names=['x', 'y'])
             self._table_overlap_stars = t_s
 
             if mask_radius is None:
@@ -2358,7 +2366,9 @@ class Image(object):
         Parameters
         ----------
         threshold_i, threshold_e : float
-            The threshold ot detect source in the galaxy inner and edge region.
+            The thresholds of detecting source in the galaxy inner and edge region.
+            The thresholds are in the units of the STD of the residual image 
+            (image - galaxy model).
         kernel_fwhm_i, kernel_fwhm_e : float (default: 2)
             The kernel FWHM to smooth the image.
         npixels_i, npixels_e : int
