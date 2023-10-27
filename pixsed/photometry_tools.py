@@ -63,25 +63,28 @@ class Image(object):
     """
 
     def __init__(self, filename=None, data=None, header=None, coord_sky=None,
-                 coord_pix=None, pixel_scale=None, target=None, telescope=None,
+                 coord_pix=None, pixel_scale=None, target=None,
                  band=None, verbose=True):
         """
         Parameters
         ----------
-        data : numpy 2D array
+        data (optional) : numpy 2D array
             The 2D image data.
-        header : astropy fits header
+        header (optional) : astropy fits header
             The header of the image data.
-        psf_fwhm : float.
-            The fwhm of the PSF. asec
-        target_coordinate : Tuple. Contain two floats.
-            The Ra and Dec of the target galaxy.
-        wavelength: float.
-            The wavelength of this image. um
-        filter_name: string.
+        coord_sky (optional) : tuple
+            The Ra and Dec of the target galaxy in float (degree) or string 
+            (hms, dms).
+        coord_pix (optional) : tuple
+            The pixel coordinate of the target.
+        pixel_scale (optional) : float
+            The pixel scale in arcsec.
+        target (optional) : string
+            The target name.
+        band: string.
             The filter name of this image.
-        telescope_name: string.
-            The telescope name of this image.
+        verbose : bool (default: True)
+            Print out detailed information if True.
         """
         if filename is None:
             self._data = data.copy()
@@ -144,11 +147,6 @@ class Image(object):
             self._target = clean_header_string(self._header.get('TARGET', None))
         else:
             self._target = target
-
-        if telescope is None:
-            self._telescope = clean_header_string(self._header.get('TELESCOP', None))
-        else:
-            self._telescope = telescope
 
         if band is None:
             self._band = clean_header_string(self._header.get('FILTER', None))
@@ -948,9 +946,14 @@ class Image(object):
             Show details if True.
         '''
         self._data_clean = self._data_subbkg.copy()
-        mask_in = self._mask_inner | self._mask_edge
         mask_galaxy = self._mask_galaxy
+        mask_in = self._mask_inner | self._mask_edge
         mask_out = self._mask_outer ^ (mask_galaxy & self._mask_outer)
+
+        mask_manual = getattr(self, '_mask_manual', None)
+        if mask_manual is not None:
+            mask_in |= (mask_manual & mask_galaxy)
+            mask_out |= (mask_manual & ~mask_galaxy)
 
         if hasattr(self, '_mask_coverage'):
             mask_in[self._mask_coverage] = False
@@ -1545,7 +1548,7 @@ class Image(object):
 
         ny, nx = self._data_subbkg.shape
 
-        if not box_size:
+        if box_size is None:
             # 1 times the PSF enclosed size
             bsize = int(self._psf_enclose_radius_pix * 2)
             box_size = (bsize, bsize)
@@ -2761,7 +2764,7 @@ class Image(object):
         '''
         Print property of the image.
         '''
-        return f'Image of {self._target} in {self._telescope}-{self._band}'
+        return f'Image of {self._target} in {self._band}'
 
 
 class Atlas(object):
@@ -2770,8 +2773,8 @@ class Atlas(object):
     science target in each image.
     '''
 
-    def __init__(self, filenames: list, coord_sky: tuple, telescope_list: list = None,
-                 band_list: list = None, verbose=True):
+    def __init__(self, filenames:list, coord_sky:tuple, band_list:list=None, 
+                 verbose=True):
         '''
         Parameters
         ----------
@@ -2779,22 +2782,20 @@ class Atlas(object):
             List of filenames.
         coord_sky : tuple
             Sky coordinate of the target, (deg, deg) or (hms, dms)
+        band_list : list
+            A list of band name.
+        verbose : bool (default: True)
+            Print out detailed information if True.
         '''
         self._image_list = []
         for loop, f in enumerate(filenames):
-            if telescope_list is not None:
-                tel = telescope_list[loop]
-            else:
-                tel = None
-
             if band_list is not None:
                 band = band_list[loop]
             else:
                 band = None
 
             self._image_list.append(Image(filename=f, coord_sky=coord_sky,
-                                          telescope=tel, band=band,
-                                          verbose=verbose))
+                                          band=band, verbose=verbose))
 
         self._coord_sky = coord_sky
         c_sky = read_coordinate(coord_sky[0], coord_sky[1])
@@ -2925,7 +2926,7 @@ class Atlas(object):
                 ax.set_yticklabels([])
 
                 img = self._image_list[loop]
-                ax.text(0.05, 0.95, f'[{loop}] {img._telescope}-{img._band}',
+                ax.text(0.05, 0.95, f'[{loop}] {img._band}',
                         ha='left', va='top', transform=ax.transAxes, **text_kwargs)
             else:
                 ax = None
@@ -3053,6 +3054,7 @@ class Atlas(object):
                                                 progress_bar=progress_bar,
                                                 verbose=verbose)
 
+        self._fwhm_match = psf_fwhm
         self._data_match = images
         self._wcs_match = output_wcs
         self._pxs_match = np.abs(output_wcs.wcs.cdelt[0]) * 3600
@@ -3115,14 +3117,14 @@ class Atlas(object):
                     axs[1].sharey(axs[0])
                     axs[0].set_xticklabels([])
                     axs[0].set_yticklabels([])
-                    axs[0].set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
+                    axs[0].set_ylabel(f'{img._band}', fontsize=18)
                 else:
                     for loop, img in enumerate(self._image_list):
                         axs[loop, 1].sharex(axs[loop, 0])
                         axs[loop, 1].sharey(axs[loop, 0])
                         axs[loop, 0].set_xticklabels([])
                         axs[loop, 0].set_yticklabels([])
-                        axs[loop, 0].set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
+                        axs[loop, 0].set_ylabel(f'{img._band}', fontsize=18)
 
             else:
                 assert fig is not None, 'Please provide fig together with axs!'
@@ -3211,7 +3213,7 @@ class Atlas(object):
             ax.imshow(x, origin='lower', cmap='Greys_r', norm=norm)
             ax.set_xticklabels([])
             ax.set_yticklabels([])
-            ax.text(0.05, 0.95, f'[{loop}] {img._telescope}-{img._band}',
+            ax.text(0.05, 0.95, f'[{loop}] {img._band}',
                     ha='left', va='top', transform=ax.transAxes, **text_kwargs)
 
             if show_mask_target:
@@ -3277,7 +3279,7 @@ class Atlas(object):
         ax.set_xlim(xlim);
         ax.set_ylim(ylim)
         ax.set_title('Image', fontsize=18)
-        ax.set_ylabel(f'{img._telescope}-{img._band}', fontsize=18)
+        ax.set_ylabel(f'{img._band}', fontsize=18)
         ax.set_xticklabels([])
         ax.set_yticklabels([])
 
@@ -3304,8 +3306,45 @@ class Atlas(object):
 
             box_size = int(img._shape[0] * box_fraction)
             img.gen_model_background(box_size=box_size, filter_size=filter_size)
-            img.background_subtract2()
+            img.background_subtract()
 
+    def reset_coordinate(self, ra, dec):
+        '''
+        Reset the target coordinate.
+
+        Parameters
+        ----------
+        ra, dec : float or string
+            The ra and dec of the target, in degree or (hms, dms)
+        '''
+        c_sky = read_coordinate(ra, dec)
+        self._ra_deg = c_sky.ra.deg
+        self._dec_deg = c_sky.dec.deg
+
+    def save_match(self, filename, overwrite=False):
+        '''
+        Save the matched images.
+        '''
+        now = datetime.now()
+        header = self._wcs_match.to_header()
+        header['PIXSED'] = True
+        header['RA'] = self._ra_deg
+        header['DEC'] = self._dec_deg
+        header['PSCALE'] = self._pxs_match
+        header['NIMAGE'] = self._n_image
+        header['PSFFWHM'] = self._fwhm_match
+        header['COMMENT'] = f'Matched resolution to {self._fwhm_match:.3f} arcsec'
+        header['COMMENT'] = f'Reduced by PIXSED on {now.strftime("%d/%m/%YT%H:%M:%S")}'
+
+        hduList = [fits.PrimaryHDU(header=header)]
+        for loop, (img, dat) in enumerate(zip(self._image_list, self._data_match)):
+            header_img = header.copy()
+            header_img['BAND'] = img._band
+            hduList.append(fits.ImageHDU(dat, header=header_img, name=f'IMAGE{loop}'))
+
+        hdul = fits.HDUList(hduList)
+        hdul.writeto(filename, overwrite=overwrite)
+    
     def set_mask_coverage(self, image_index, mask=None, shape='rect', mask_kwargs=None,
                           fill_value=None, plot=False, fig=None, axs=None, 
                           norm_kwargs=None, interactive=False, verbose=False):
