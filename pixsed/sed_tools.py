@@ -5,8 +5,7 @@ from astropy.io import fits
 import astropy.units as units
 from astropy.visualization import simple_norm
 from photutils.segmentation import SegmentationImage
-from vorbin.voronoi_2d_binning import voronoi_2d_binning
-from .utils import plot_segment_contours
+from .utils import plot_segment_contours, binmap_voronoi
 
 class SED_cube(object):
     '''
@@ -38,7 +37,8 @@ class SED_cube(object):
 
     def binmap_voronoi(self, ref_band, target_sn, cvt=True, wvt=True, 
                        sn_func=None, plot=False, fig=None, axs=None, 
-                       norm_kwargs=None, label_kwargs=None, interactive=False, verbose=False):
+                       norm_kwargs=None, label_kwargs=None, interactive=False, 
+                       verbose=False):
         '''
         Bin the image with the voronoi method.
 
@@ -71,51 +71,6 @@ class SED_cube(object):
         verbose : bool (default: True)
             Show details if True.
         '''
-        idx = self.get_band_index(ref_band)
-        img = self._image[idx]
-        err = self._error[idx]
-        pxs = self._pxs
-        mask = self._mask_galaxy
-
-        # Prepare the input of vorbin
-        xi = np.arange(0, img.shape[1])
-        yi = np.arange(0, img.shape[0])
-        x = xi - np.mean(xi)
-        y = yi - np.mean(yi)
-        xx, yy = np.meshgrid(x, y)
-        xList = xx[mask]
-        yList = yy[mask]
-        signal = img[mask]
-        noise = err[mask]
-
-        results = voronoi_2d_binning(
-            xList, yList, signal, noise, target_sn, cvt=cvt, wvt=wvt, 
-            sn_func=sn_func, pixelsize=1, plot=False, quiet=~verbose)
-        
-        xmin = x.min()
-        ymin = y.min()
-        x_bar = results[3] - xmin
-        y_bar = results[4] - ymin
-        x_index = (xList - xmin).astype(int)
-        y_index = (yList - ymin).astype(int)
-
-        self._bin_info = {
-            'ref_band': ref_band,
-            'nbins': np.max(results[0])+1,
-            'bin_num': results[0],
-            'x_index': x_index,
-            'y_index': y_index,
-            'x_bar': x_bar,
-            'y_bar': y_bar,
-            'sn': results[5],
-            'nPixels': results[6],
-            'scale': results[7]
-        }
-        
-        segm = np.zeros_like(img, dtype=int)
-        segm[mask] = self._bin_info['bin_num']
-        self._segm = SegmentationImage(segm)
-
         if plot:
             if interactive:
                 ipy = get_ipython()
@@ -126,54 +81,23 @@ class SED_cube(object):
 
             if axs is None:
                 fig, axs = plt.subplots(1, 2, figsize=(14, 7))
-            
+        
             if interactive:
                 fig.canvas.mpl_connect('close_event', on_close)
+        
+        idx = self.get_band_index(ref_band)
+        img = self._image[idx]
+        err = self._error[idx]
+        mask = self._mask_galaxy
 
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-            norm = simple_norm(img, **norm_kwargs)
+        self._segm, self._bin_info = binmap_voronoi(
+            image=img, error=err, mask=mask, target_sn=target_sn, 
+            pixelsize=self._pxs, cvt=cvt, wvt=wvt, sn_func=sn_func, plot=plot, 
+            fig=fig, axs=axs, norm_kwargs=norm_kwargs, 
+            label_kwargs=label_kwargs, interactive=False, verbose=verbose)
 
-            ax = axs[0]
-            ax.imshow(img, origin='lower', cmap='Greys_r', norm=norm)
-            plot_segment_contours(self._segm, ax=ax)
-            ax.set_xlabel(r'$\Delta X$ (pixel)', fontsize=24)
-            ax.set_ylabel(r'$\Delta Y$ (pixel)', fontsize=24)
-            ax.text(0.05, 0.95, ref_band, fontsize=18, color='w', 
-                    transform=ax.transAxes, va='top', ha='left')
-
-            if label_kwargs is not None:
-                if 'fontsize' not in label_kwargs:
-                    label_kwargs['fontsize'] = 6
-
-                if 'color' not in label_kwargs:
-                    label_kwargs['color'] = 'cyan'
-
-                for xb, yb in zip(x_bar, y_bar):
-                    v = segm[int(yb), int(xb)]
-                    ax.text(xb, yb, f'{v}', transform=ax.transData, ha='center', 
-                            va='center', **label_kwargs)
-            
-            ax = axs[1]
-            r_input = np.sqrt(xList**2 + yList**2) * pxs
-            snr_input = signal / noise
-            ax.scatter(r_input, snr_input, color='k', s=20, label='Input S/N')
-
-            r_output = np.sqrt(results[3]**2 + results[4]**2) * pxs
-            snr_output = results[5]
-
-            fltr = results[6] == 1
-            if np.sum(fltr) > 0:
-                ax.scatter(r_output[fltr], snr_output[fltr], marker='x', color='b', s=50, 
-                           label='Not binned')
-            ax.scatter(r_output[~fltr], snr_output[~fltr], color='r', s=50, 
-                       label='Voronoi bins')
-            ax.axhline(y=target_sn, ls='--', color='C0', label='Target S/N')
-            ax.set_xlim([0, r_output.max()])
-            ax.legend(loc='upper right', fontsize=16)
-            ax.minorticks_on()
-            ax.set_xlabel(r'Radius (arcsec)', fontsize=24)
-            ax.set_ylabel(r'S/N', fontsize=24)
+        axs[0].text(0.05, 0.95, ref_band, fontsize=18, color='w', 
+                    transform=axs[0].transAxes, va='top', ha='left')
 
     def collect_sed(self, calib_error=None):
         '''
