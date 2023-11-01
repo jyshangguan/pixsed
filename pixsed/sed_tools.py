@@ -1,0 +1,280 @@
+import numpy as np
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+from astropy.io import fits
+import astropy.units as units
+from astropy.visualization import simple_norm
+from photutils.segmentation import SegmentationImage
+from vorbin.voronoi_2d_binning import voronoi_2d_binning
+from .utils import plot_segment_contours
+
+class SED_cube(object):
+    '''
+    The class of a data cube.
+    '''
+
+    def __init__(self, filename) -> None:
+        '''
+        Parameters
+        ----------
+        filename : string
+            The file name of the SED data cube.
+
+        Notes
+        -----
+        FIXME: doc
+        '''
+        self._header = fits.getheader(filename, ext=0)
+        self._image = fits.getdata(filename, extname='image')
+        self._error = fits.getdata(filename, extname='error')
+        self._mask_galaxy = fits.getdata(filename, extname='mask_galaxy').astype(bool)
+        self._pxs = self._header['PSCALE']  # units: arcsec
+        
+        info = fits.getdata(filename, extname='info')
+        info_header = fits.getheader(filename, extname='info')
+        self._band = list(info['BAND'])
+        self._wavelength = np.array(info['WAVELENGTH']) * units.Unit(info_header['TUNIT2'])
+        self._nband = len(self._band)
+
+    def binmap_voronoi(self, ref_band, target_sn, cvt=True, wvt=True, 
+                       sn_func=None, plot=False, fig=None, axs=None, 
+                       norm_kwargs=None, label_kwargs=None, interactive=False, verbose=False):
+        '''
+        Bin the image with the voronoi method.
+
+        Parameters
+        ----------
+        ref_band : string
+            The name of the reference band.
+        target_sn : float
+            The target SNR of the voronoi binning.
+        cvt : bool (default: True)
+            Use the Centroidal Voronoi Tessellation (CVT) algorithm if True.  
+            See the doc of vorbin.
+        wvt : bool (default: True)
+            Use the Weighted Voronoi Tessellation method to modify the binning. 
+            See the doc of vorbin.
+        sn_func (optional) : callable
+            The function to calculate SNR. See the doc of vorbin.
+        plot : bool (default: False)
+            Plot the results if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        label_kwargs (optional) : dict
+            Add the label to the voronoi bins if specified.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+        '''
+        idx = self.get_band_index(ref_band)
+        img = self._image[idx]
+        err = self._error[idx]
+        pxs = self._pxs
+        mask = self._mask_galaxy
+
+        # Prepare the input of vorbin
+        xi = np.arange(0, img.shape[1])
+        yi = np.arange(0, img.shape[0])
+        x = xi - np.mean(xi)
+        y = yi - np.mean(yi)
+        xx, yy = np.meshgrid(x, y)
+        xList = xx[mask]
+        yList = yy[mask]
+        signal = img[mask]
+        noise = err[mask]
+
+        results = voronoi_2d_binning(
+            xList, yList, signal, noise, target_sn, cvt=cvt, wvt=wvt, 
+            sn_func=sn_func, pixelsize=1, plot=False, quiet=~verbose)
+        
+        xmin = x.min()
+        ymin = y.min()
+        x_bar = results[3] - xmin
+        y_bar = results[4] - ymin
+        x_index = (xList - xmin).astype(int)
+        y_index = (yList - ymin).astype(int)
+
+        self._bin_info = {
+            'ref_band': ref_band,
+            'nbins': np.max(results[0])+1,
+            'bin_num': results[0],
+            'x_index': x_index,
+            'y_index': y_index,
+            'x_bar': x_bar,
+            'y_bar': y_bar,
+            'sn': results[5],
+            'nPixels': results[6],
+            'scale': results[7]
+        }
+        
+        segm = np.zeros_like(img, dtype=int)
+        segm[mask] = self._bin_info['bin_num']
+        self._segm = SegmentationImage(segm)
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+            
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(img, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(img, origin='lower', cmap='Greys_r', norm=norm)
+            plot_segment_contours(self._segm, ax=ax)
+            ax.set_xlabel(r'$\Delta X$ (pixel)', fontsize=24)
+            ax.set_ylabel(r'$\Delta Y$ (pixel)', fontsize=24)
+            ax.text(0.05, 0.95, ref_band, fontsize=18, color='w', 
+                    transform=ax.transAxes, va='top', ha='left')
+
+            if label_kwargs is not None:
+                if 'fontsize' not in label_kwargs:
+                    label_kwargs['fontsize'] = 6
+
+                if 'color' not in label_kwargs:
+                    label_kwargs['color'] = 'cyan'
+
+                for xb, yb in zip(x_bar, y_bar):
+                    v = segm[int(yb), int(xb)]
+                    ax.text(xb, yb, f'{v}', transform=ax.transData, ha='center', 
+                            va='center', **label_kwargs)
+            
+            ax = axs[1]
+            r_input = np.sqrt(xList**2 + yList**2) * pxs
+            snr_input = signal / noise
+            ax.scatter(r_input, snr_input, color='k', s=20, label='Input S/N')
+
+            r_output = np.sqrt(results[3]**2 + results[4]**2) * pxs
+            snr_output = results[5]
+
+            fltr = results[6] == 1
+            if np.sum(fltr) > 0:
+                ax.scatter(r_output[fltr], snr_output[fltr], marker='x', color='b', s=50, 
+                           label='Not binned')
+            ax.scatter(r_output[~fltr], snr_output[~fltr], color='r', s=50, 
+                       label='Voronoi bins')
+            ax.axhline(y=target_sn, ls='--', color='C0', label='Target S/N')
+            ax.set_xlim([0, r_output.max()])
+            ax.legend(loc='upper right', fontsize=16)
+            ax.minorticks_on()
+            ax.set_xlabel(r'Radius (arcsec)', fontsize=24)
+            ax.set_ylabel(r'S/N', fontsize=24)
+
+    def collect_sed(self, calib_error=None):
+        '''
+        Collect the SEDs. It generates _seds=dict(flux, error). 
+        The flux and error have 2 dimensions of (nbands, nbins).
+
+        Parameters
+        ----------
+        calib_error (optional) : 1D array
+            The fraction of flux that will be added in quadrature to the error.
+        '''
+        assert getattr(self, '_bin_info', None) is not None, 'Please generate the binned map first!'
+        bin_num = self._bin_info['bin_num']
+        x_index = self._bin_info['x_index']
+        y_index = self._bin_info['y_index']
+
+        flux = np.zeros([self._nband, self._bin_info['nbins']])
+        vars = np.zeros([self._nband, self._bin_info['nbins']])
+        for b, x, y in zip(bin_num, x_index, y_index):
+            flux[:, b] += self._image[:, y, x]
+            vars[:, b] += self._error[:, y, x]**2
+        error = np.sqrt(vars)
+
+        if calib_error is not None:
+            assert len(calib_error) == self._nband, f'The calib_error should have {self._nband} elements!'
+            error = np.sqrt(error**2 + (calib_error[:, np.newaxis] * flux)**2)
+
+        self._seds = {
+            'flux': flux,
+            'error': error
+        }
+
+    def plot_sed(self, index, fig=None, axs=None, norm_kwargs=None, 
+                 units_w='micron', units_f='Jy', verbose=False):
+        '''
+        Plot the SED of a selected bin.
+
+        Parameters
+        ----------
+        index : int
+            The bin index to plot.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        units_w : string (default: 'micron')
+            The units of the wavelength.
+        units_f : string (default: 'Jy')
+            The units of the flux.
+        verbose : bool (default: False)
+            Print information if True.
+        '''
+        flux = self._seds['flux'][:, index]
+        error = self._seds['error'][:, index]
+        x = self._bin_info['x_bar'][index]
+        y = self._bin_info['y_bar'][index]
+
+        if axs is None:
+            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+            fig.subplots_adjust(wspace=0.2)
+
+        ax = axs[0]
+        ref_band = self._bin_info['ref_band']
+        idx = self.get_band_index(ref_band)
+        img = self._image[idx]
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+        norm = simple_norm(img, **norm_kwargs)
+        ax.imshow(img, origin='lower', cmap='Greys_r', norm=norm)
+        plot_segment_contours(self._segm, ax=ax, verbose=verbose)
+        ax.plot(x, y, marker='x', ms=8, color='r')
+        ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
+        ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
+        ax.text(0.05, 0.95, ref_band, fontsize=18, color='w', 
+                transform=ax.transAxes, va='top', ha='left')
+        
+        ax = axs[1]
+        w = self._wavelength.to(units_w).value
+        ax.errorbar(w, flux, yerr=error, marker='o', mec='k', mfc='none', color='k')
+        ax.text(0.05, 0.95, f'Bin: {index}', fontsize=18, color='k', 
+                transform=ax.transAxes, va='top', ha='left')
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel(f'Wavelength ({units_w})', fontsize=24)
+        ax.set_ylabel(f'Flux ({units_f})', fontsize=24)
+
+    def get_band_index(self, band):
+        '''
+        Get the index of the band in the cube.
+
+        Parameters
+        ----------
+        band : string
+            The band name.
+        
+        Returns
+        -------
+        idx : int
+            The index of the band.
+        '''
+        idx = self._band.index(band)
+        return idx
