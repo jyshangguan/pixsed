@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 import numpy.ma as ma
 from copy import deepcopy
-import astropy.units as u
+import astropy.units as units
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, gaussian_fwhm_to_sigma, SigmaClip
@@ -185,6 +185,38 @@ def add_mask_rect(mask, xmin, xmax, ymin, ymax, value=1):
     fltr = (xx > xmin) & (xx < xmax) & (yy > ymin) & (yy < ymax)
     mask[fltr] = value
     return mask
+
+
+def band_center_wavelength(band):
+    '''
+    Get the central wavelength of the band.
+    We adopt the effective wavelength according to SVO
+        http://svo2.cab.inta-csic.es/svo/theory/fps3/index.php
+    '''
+    wDict = {
+        'GALEX_FUV': 1548.85*units.Angstrom,
+        'GALEX_NUV': 2303.37*units.Angstrom,
+        'SDSS_u': 3608.04*units.Angstrom,
+        'SDSS_g': 4671.78*units.Angstrom,
+        'SDSS_r': 6141.12*units.Angstrom,
+        'SDSS_i': 7457.89*units.Angstrom,
+        'SDSS_z': 8922.78*units.Angstrom,
+        '2MASS_J': 1.2350*units.micron,
+        '2MASS_H': 1.6620*units.micron,
+        '2MASS_Ks': 2.1590*units.micron,
+        'WISE_W1': 3.3526*units.micron,
+        'WISE_W2': 4.6028*units.micron,
+        'WISE_W3': 11.5608*units.micron,
+        'WISE_W4': 22.0883*units.micron,
+        'PACS_70': 68.919665*units.micron,
+        'PACS_100': 97.898566*units.micron,
+        'PACS_160': 154*units.micron,
+        'SPIRE_250': 243*units.micron,
+        'SPIRE_350': 341*units.micron,
+        'SPIRE_500': 483*units.micron,
+    }
+    w = wDict.get(band, None)
+    return w
 
 
 def circular_error_estimate(img, mask, radius, nexample, percent=85.):
@@ -1123,18 +1155,9 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
 
     for img in imGen:
         if psf_fwhm > img._psf_fwhm:
-
             fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
             sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
             data_conv = gaussian_filter(img._data_clean, sigma=sigma)
-            '''
-            fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
-            size = int(psf_fwhm / img._pxs)
-            if size % 2 == 0:
-                size += 1
-            kernel = make_2dgaussian_kernel(fwhm / img._pxs, size)
-            data_conv = convolve(img._data_clean, kernel)
-            '''
         else:
             if verbose:
                 print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
@@ -1147,6 +1170,81 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
 
         images.append(data_rebin)
     return images, output_wcs
+
+
+def gen_variance_matched(atlas, psf_fwhm: float, image_size: float,
+                         pixel_scale: float = None, progress_bar=False,
+                         verbose=False):
+    '''
+    Generate the matched variance images.
+
+    Parameters
+    ----------
+    atlas : Atlas
+        The Atlas object.
+    psf_fwhm : float
+        The PSF FWHM, units: arcsec
+    image_size : float
+        The size of the output image, units: arcsec
+    pixel_scale (optional) : float
+        The output pixel scale, units: arcsec. If not provided, half of
+        the psf_fwhm will be used to ensure the Nyquist sampling.
+    progress_bar : bool (default: False)
+        The progress of the processed images.
+    verbose : bool (default: False)
+        Print details if True.
+
+    Returns
+    -------
+    images : list
+        List of matched images.
+    output_wcs : WCS
+        The WCS of the output images.
+
+    Notes
+    -----
+    FIXME: The PSF matching is simplied for now by just using a Gaussian
+           convolution. We can implement more rigorous matching method later.
+    '''
+    if pixel_scale is None:
+        pixel_scale = psf_fwhm / 2.  # Nyquist sampling
+
+    image_size_pix = np.ceil(image_size / pixel_scale).astype(int)
+
+    output_wcs = WCS(naxis=2)
+    output_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    output_wcs.wcs.crval = [atlas._ra_deg, atlas._dec_deg]
+    output_wcs.wcs.crpix = image_size_pix // 2, image_size_pix // 2
+    output_wcs.wcs.cdelt = -1 * pixel_scale / 3600, pixel_scale / 3600
+    shape_out = (image_size_pix, image_size_pix)
+    output_wcs.pixel_shape = shape_out
+
+    varmaps = []
+
+    if progress_bar:
+        imGen = tqdm.tqdm(atlas)
+    else:
+        imGen = atlas._image_list
+
+    for img in imGen:
+        assert getattr(img, '_data_variance', None) is not None, 'Please generate the variance map!'
+
+        if psf_fwhm > img._psf_fwhm:
+            fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
+            sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
+            data_conv = gaussian_filter(img._data_variance, sigma=sigma)
+        else:
+            if verbose:
+                print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
+            data_conv = img._data_variance
+
+        data_rebin, _ = reproject_adaptive((data_conv, img._wcs), output_wcs,
+                                           shape_out=shape_out, kernel='gaussian',
+                                           conserve_flux=True,
+                                           boundary_mode='ignore')
+
+        varmaps.append(data_rebin)
+    return varmaps, output_wcs
 
 
 def get_mask_polygons(mask, connectivity=8):
@@ -1543,15 +1641,41 @@ def plot_mask_contours(mask, ax=None, verbose=False, **plot_kwargs):
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 7))
 
-    if plot_kwargs is None:
-        plot_kwargs = dict(color='cyan', lw=1)
-
     for p in pList:
         poly = shape(p)
         xy_poly = np.c_[poly.exterior.xy]
-        ax.plot(xy_poly[:, 0], xy_poly[:, 1], **plot_kwargs)
+        ax.plot(xy_poly[:, 0]-0.5, xy_poly[:, 1]-0.5, **plot_kwargs)
     return ax
 
+
+def plot_segment_contours(segm, ax=None, connectivity=8, verbose=False, **plot_kwargs):
+    '''
+    Plot the SegmentionImage in contours.
+    '''
+    #pList = get_mask_polygons(segm.data, connectivity=connectivity)
+    polygons = np.array(list(shapes(segm.data.astype('int32'), connectivity=connectivity)))
+    fltr = polygons[:, 1] > 0
+    pList = polygons[fltr, 0]
+    vList = polygons[fltr, 1]
+
+    if verbose:
+        print(f'Found {len(pList)} masks!')
+        pList = tqdm.tqdm(pList)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 7))
+
+    for p, v in zip(pList, vList):
+        poly = shape(p)
+        xy_poly = np.c_[poly.exterior.xy]
+
+        kwargs = plot_kwargs.copy()
+        if ('c' not in plot_kwargs) & ('color' not in plot_kwargs):
+            kwargs['c'] = f'C{int(v%10)}'
+        x = xy_poly[:, 0] - 0.5
+        y = xy_poly[:, 1] - 0.5
+        ax.plot(x, y, **kwargs)
+    return ax
 
 def polys_to_mask(polys, mask_shape):
     '''
@@ -1598,7 +1722,7 @@ def read_coordinate(ra, dec):
     '''
     if isinstance(ra, str):
         assert isinstance(dec, str)
-        c = SkyCoord('{0} {1}'.format(ra, dec), frame='icrs', unit=(u.hourangle, u.deg))
+        c = SkyCoord('{0} {1}'.format(ra, dec), frame='icrs', unit=(units.hourangle, units.deg))
     else:
         c = SkyCoord(ra, dec, frame='icrs', unit='deg')
     return c
@@ -1905,6 +2029,35 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None,
     return tb_s
 
 
+def simplify_mask(mask, connectivity=8):
+    '''
+    Simplify the mask to the convex hull.
+
+    Parameters
+    ----------
+    mask : 2D array
+        The mask or segments. The masked region have True or >=1 values.
+    connectivity : {4, 8} (default: 8)
+        The type of pixel connectivity used in determining how pixels are
+        grouped into a detected source. The options are 4 or 8 (default).
+        4-connected pixels touch along their edges. 8-connected pixels touch
+        along their edges or corners.
+
+    Returns
+    -------
+    mask_s : 2D array
+        The simplified mask with masked region True.
+    '''
+    pList = get_mask_polygons(mask, connectivity=connectivity)
+
+    # Get the convex hull
+    sList = [shape(p).convex_hull for p in pList]
+
+    # Convert back to masks
+    mask_s = rasterize(sList, out_shape=mask.shape).astype('bool')
+    return mask_s
+
+
 def xmatch_gaiadr3(cat, radius, colRA1='ra', colDec1='dec'):
     '''
     Cross match the catalog with Gaia DR3.
@@ -1929,6 +2082,6 @@ def xmatch_gaiadr3(cat, radius, colRA1='ra', colDec1='dec'):
     -----
     [SGJY added]
     '''
-    t_o = XMatch.query(cat1=cat, cat2='vizier:I/355/gaiadr3', max_distance=radius * u.arcsec,
+    t_o = XMatch.query(cat1=cat, cat2='vizier:I/355/gaiadr3', max_distance=radius * units.arcsec,
                        colRA1=colRA1, colDec1=colDec1)  # Gaia xmatch.
     return t_o

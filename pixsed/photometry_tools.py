@@ -41,10 +41,10 @@ from shapely.geometry import shape
 from .utils import read_coordinate, plot_image, circular_error_estimate
 from .utils import xmatch_gaiadr3, plot_mask_contours
 from .utils import get_image_segmentation, gen_image_mask, detect_source_extended
-from .utils import scale_mask, get_mask_polygons, add_mask_circle, adapt_mask, adapt_segmentation
+from .utils import scale_mask, simplify_mask, add_mask_circle, adapt_mask, adapt_segmentation
 from .utils import select_segment_stars, segment_combine, segment_remove
 from .utils import clean_header_string, add_mask_circle, add_mask_rect
-from .utils import gen_images_matched, image_photometry
+from .utils import gen_images_matched, gen_variance_matched, image_photometry
 from .utils import gen_random_apertures, gen_aperture_ellipse
 from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
@@ -57,10 +57,10 @@ mpl.rc("ytick.minor", width=1., size=5)
 
 
 class Image(object):
-    """
+    '''
     The class of an image. For the moment, we only assume that there is one
     science target in the image.
-    """
+    '''
 
     def __init__(self, filename=None, data=None, header=None, coord_sky=None,
                  coord_pix=None, pixel_scale=None, target=None,
@@ -1457,7 +1457,8 @@ class Image(object):
     def gen_model_background(self, box_size=None, filter_size=5, plot=False,
                              norm_kwargs=None, show_mask=False):
         '''
-        Generate the background model.Using median background method.
+        Generate the background model. Using mean background method.
+
         Parameter
         ----------
         box_size: int or tuple (ny, nx)
@@ -2092,6 +2093,126 @@ class Image(object):
         self._mask_galaxy = mask
         self._segment_map = smap
         self._data_convolved = cdata
+
+    def gen_variance_background(self, box_size=None, filter_size=5, nsigma=2, 
+                                kernel_fwhm=5, f_sample=1):
+        '''
+        Generate the background variance map with photutils Background2D.
+
+        Parameter
+        ----------
+        box_size: int or tuple (ny, nx)
+            The size used to calculate the local median.
+            If None, the default size is 1/30 of the image size.
+            It is better not to use a too small box size, otherwise there is
+            a high risk to remove the source emission.
+        filter_size: int or tuple (ny, nx) (default: 5)
+            The kernel size used to smooth the background model.
+        nsigma : float (default: 2)
+            The number of sigma as the threshold to generate a source mask.
+        kernel_fwhm : float (default: 5)
+            The FWHM of the kernel to convolve the image to generate a source 
+            mask.
+        f_sample : float (default: 1)
+            The fraction of the pixels that are used in calculating 
+            the background statistics, range (0, 1).
+
+        Returns
+        -------
+        var_bkg : 2D array
+            The background variance image.
+        '''
+        assert hasattr(self, '_data_subbkg'), 'Please generate the _data_subbkg!'
+        image = self._data_subbkg
+
+        coverage_mask = getattr(self, '_mask_coverage', None)
+
+        if getattr(self, '_bkg_std', None) is None:
+            _, _, bkg_std = self.background_properties(mask_type='subbkg', f_sample=f_sample)
+        else:
+            bkg_std = self._bkg_std
+        
+        threshold =  nsigma * bkg_std
+        mask, _, _ = gen_image_mask(
+            image, threshold, mask=coverage_mask, kernel_fwhm=kernel_fwhm)
+
+        ny, nx = image.shape
+        if not box_size:
+            box_size = (ny // 30, nx // 30)
+
+        sigma_clip = SigmaClip(sigma=3.)
+        bkg_estimator = MeanBackground()
+        bkg = Background2D(
+            image, box_size, mask=mask, coverage_mask=coverage_mask, 
+            filter_size=filter_size, sigma_clip=sigma_clip, 
+            bkg_estimator=bkg_estimator)
+        var_bkg = np.square(bkg.background_rms)
+        return var_bkg
+
+    def load_mask_manual(self, filename, ext=0, plot=False, fig=None,
+                         ax=None, norm_kwargs=None, interactive=False,
+                         verbose=False):
+        '''
+        Load the manual mask.  If there is already a manual mask, the mask will 
+        be added.
+
+        Parameters
+        ----------
+        filename : string
+            The file name of the mask.
+        ext : int (default: 0)
+            The extension of the mask file.
+        fig : Matplotlib Figure
+            The figure to plot.
+        ax : Matplotlib Axis
+            The axis to plot.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+        '''
+        hdul = fits.open(filename)
+        mask = hdul[ext].data.astype(bool)
+
+        mask_manual = getattr(self, '_mask_manual', None)
+        if mask_manual is None:
+            self._mask_manual = mask
+        else:
+            self._mask_manual = mask_manual | mask
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if ax is None:
+                fig, ax = plt.subplots(figsize=(7, 7))
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+
+            if hasattr(self, '_data_subbkg'):
+                image = self._data_subbkg
+            else:
+                image = self._data
+
+            norm = simple_norm(image, **norm_kwargs)
+            ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            plot_mask_contours(self._mask_manual, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
 
     def load_psf_data(self, filename, oversample=None, extension=0):
         '''
@@ -2774,7 +2895,7 @@ class Atlas(object):
     '''
 
     def __init__(self, filenames:list, coord_sky:tuple, band_list:list=None, 
-                 verbose=True):
+                 wavelength:list=None, verbose=True):
         '''
         Parameters
         ----------
@@ -2802,6 +2923,8 @@ class Atlas(object):
         self._ra_deg = c_sky.ra.deg
         self._dec_deg = c_sky.dec.deg
         self._n_image = len(self._image_list)
+        self.band_list = band_list
+        self.wavelength = wavelength
 
     def adapt_masks(self, filename, interpolate_scale=None, plot=False,
                     fig=None, axs=None, norm_kwargs=None, verbose=False):
@@ -2955,48 +3078,60 @@ class Atlas(object):
             else:
                 ax.legend(loc='lower left', bbox_to_anchor=(0, 1), fontsize=16, ncols=2, handlelength=1)
 
-    def clean_image(self, image_index: int = None, model_box_size=None,
-                    model_filter_size=3, skip_reduction=False, plot=False,
+    def clean_image(self, image_index:int=None, model_box_size:int=None,
+                    model_filter_size:int=3, plot=False,
                     fig=None, axs=None, norm_kwargs=None, interactive=False,
                     verbose=False):
         '''
         Clean up the contaminants in the image.
+
+        Parameters
+        ----------
+        image_index (optional) : int
+            The index of the image to clean. If None, process all the images.
+        model_box_size (optional) : int
+            The box size to generate the galaxy model.
+        model_filter_size (optional) : int
+            The filter size to generate the galaxy model.
+        plot : bool (default: False)
+            Plot the results if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. One or _n_image panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         '''
         if image_index == None:
             n_image = self._n_image
         else:
             n_image = 1
 
-        if skip_reduction:
+        if model_box_size is None:
+            model_box_size = int(self._mask_interpolate_scale)
+
+        if image_index == None:
             for loop, img in enumerate(self._image_list):
-                assert hasattr(img, '_data_subbkg'), \
-                    f'Image {loop} ({img}) does not have _data_subbkg'
-                assert hasattr(img, '_mask_contaminant'), \
-                    f'Image {loop} ({img}) does not have _mask_contaminant'
-                assert hasattr(img, '_data_clean'), \
-                    f'Image {loop} ({img}) does not have _data_clean'
+                if verbose:
+                    print(f'[clean_image] model image {loop}: {img}')
+
+                # Convert the box size into pixel units for each image
+                model_box_size_pix = int(model_box_size / img._pxs)
+
+                img.gen_model_galaxy(box_size=model_box_size_pix,
+                                     filter_size=model_filter_size,
+                                     plot=False)
+
+                if verbose:
+                    print(f'[clean_image] clean image {loop}: {img}')
+
+                img.gen_image_clean(plot=False)
         else:
-            if model_box_size is None:
-                model_box_size = int(self._mask_interpolate_scale)
-
-            if image_index == None:
-                for loop, img in enumerate(self._image_list):
-                    if verbose:
-                        print(f'[clean_image] model image {loop}: {img}')
-
-                    # Convert the box size into pixel units for each image
-                    model_box_size_pix = int(model_box_size / img._pxs)
-
-                    img.gen_model_galaxy(box_size=model_box_size_pix,
-                                         filter_size=model_filter_size,
-                                         plot=False)
-
-                    if verbose:
-                        print(f'[clean_image] clean image {loop}: {img}')
-
-                    img.gen_image_clean(plot=False)
-            else:
-                img = self._image_list[image_index]
+            img = self._image_list[image_index]
 
         if plot:
             if interactive:
@@ -3030,8 +3165,72 @@ class Atlas(object):
                 self.plot_single_image(image_index, fig=fig, axs=axs, verbose=verbose,
                                        norm_kwargs=norm_kwargs, interactive=False)
 
-    def match_image(self, psf_fwhm, image_size, pixel_scale=None,
-                    plot=False, progress_bar=False, verbose=False):
+    def match_mask_galaxy(self, mask, input_wcs, simplify=True, connectivity=8, 
+                          plot=False, ncols=1, verbose=False):
+        '''
+        Convert the target mask to the matched images. 
+
+        Parameters
+        ----------
+        mask : 2D array
+            The input mask.
+        input_wcs : WCS
+            The wcs of the input mask.
+        simplify : bool (default: True)
+            Simplify the mask with the convex hull if True.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are
+            grouped into a detected source. The options are 4 or 8 (default).
+            4-connected pixels touch along their edges. 8-connected pixels touch
+            along their edges or corners.
+        plot : bool (default: False)
+            Plot the matched images and masks if True.
+        ncols : int (default: 1)
+            Number of columns to plot.
+        verbose : bool (default: False)
+            Print additional info if True.
+        '''
+        assert getattr(self, '_wcs_match', None) is not None, 'Please run match_image() first!'
+        shape_out = self._wcs_match.pixel_shape
+
+        if simplify:
+            mask = simplify_mask(mask, connectivity=connectivity)
+
+        mask_out = adapt_mask(mask, input_wcs=input_wcs, 
+                              output_wcs=self._wcs_match, shape_out=shape_out)
+        
+        # Include the coverage mask
+        for img in self:
+            mask_coverage_org = getattr(img, '_mask_coverage', None)
+            if mask_coverage_org is not None:
+                mask_coverage = adapt_mask(
+                    mask_coverage_org, input_wcs=img._wcs, 
+                    output_wcs=self._wcs_match, shape_out=shape_out)
+                mask_out &= ~mask_coverage
+            
+        # Exclude NaN
+        for data in self._data_match:
+            mask_out &= ~np.isnan(data)
+
+        self._mask_galaxy_match = mask_out
+
+        if plot:
+            nrows = int(np.ceil(self._n_image / ncols))
+
+            fig, axs = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
+            axs = axs.flatten()
+            fig.subplots_adjust(wspace=0.05, hspace=0.05)
+
+            self.plot_atlas(
+                ncols=ncols, data_type='data_match', show_info='size', 
+                show_units='arcmin', interactive=False, fig=fig, axs=axs)
+            
+            for loop in range(self._n_image):
+                plot_mask_contours(mask_out, ax=axs[loop], verbose=verbose, color='cyan')
+
+    def match_image(self, psf_fwhm, image_size, pixel_scale=None, 
+                    skip_variance=False, plot=False, ncols=3, 
+                    progress_bar=False, verbose=False):
         '''
         Generate the matched images.
 
@@ -3044,15 +3243,16 @@ class Atlas(object):
         pixel_scale (optional) : float
             The output pixel scale, units: arcsec. If not provided, half of
             the psf_fwhm will be used to ensure the Nyquist sampling.
+        skip_variance : bool (default: False)
+            Skip matching the variance map if True.
         progress_bar : bool (default: False)
             The progress of the processed images.
         verbose : bool (default: False)
             Print details if True.
         '''
-        images, output_wcs = gen_images_matched(self, psf_fwhm, image_size=image_size,
-                                                pixel_scale=pixel_scale,
-                                                progress_bar=progress_bar,
-                                                verbose=verbose)
+        images, output_wcs = gen_images_matched(
+            self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale, 
+            progress_bar=progress_bar, verbose=verbose)
 
         self._fwhm_match = psf_fwhm
         self._data_match = images
@@ -3060,10 +3260,18 @@ class Atlas(object):
         self._pxs_match = np.abs(output_wcs.wcs.cdelt[0]) * 3600
         self._shape_match = output_wcs.pixel_shape
 
-        if plot:
-            self.plot_atlas(ncols=3, data_type='data_match', show_info='size', show_units='arcmin', interactive=False)
+        if not skip_variance:
+            varmaps, output_wcs = gen_variance_matched(
+                self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale,
+                progress_bar=progress_bar, verbose=verbose)
+            self._vars_match = varmaps
 
-    def gen_mask_contaminant(self, image_index: int = None, expand_inner=1,
+        if plot:
+            self.plot_atlas(
+                ncols=ncols, data_type='data_match', show_info='size', 
+                show_units='arcmin', interactive=False)
+
+    def gen_mask_contaminant(self, image_index:int=None, expand_inner=1,
                              expand_edge=1, expand_outer=1, expand_manual=1, 
                              plot=False, fig=None, axs=None, norm_kwargs=None,
                              interactive=False, verbose=False):
@@ -3158,11 +3366,105 @@ class Atlas(object):
                                      norm_kwargs=norm_kwargs,
                                      interactive=interactive, verbose=verbose)
 
-    def plot_atlas(self, ncols=1, data_type='data', show_info: str = None,
-                   show_units: str = None, show_mask_target=False, text_kwargs=None, fig=None, axs=None,
-                   norm_kwargs=None, interactive=False, verbose=False):
+    def gen_mask_manual(self, image_index:int, verbose=True):
+        '''
+        Generate a manual mask.  A pop-up figure will be generated for
+        interactive operations.
+
+        Check the operation manual of the two modes in MaskBuilder_draw and
+        MaskBuilder_segm in the utils_interactive module.
+
+        Parameters
+        ----------
+        image_index : int
+            The image index.
+        verbose : bool (default: False)
+            Output details if True.
+
+        Notes
+        -----
+        [SGJY added]
+        '''
+        # Change the matplotlib backend
+        ipy = get_ipython()
+        ipy.run_line_magic('matplotlib', 'tk')
+
+        # Prepare the event functions
+        def on_click(event):
+            mb.on_click(event)
+
+        def on_press(event):
+            mb.on_press(event)
+
+        def on_close(event):
+            for loop, img in enumerate(self):
+                mask_manual = getattr(img, '_mask_manual', None)
+                if mask_manual is None:
+                    mask_manual = np.zeros_like(mask_new, dtype=bool)
+
+                if loop == image_index:
+                    img._mask_manual = mask_manual | mask_new
+                else:
+                    mask_adapt = adapt_mask(
+                        mask_new, input_wcs=img_ref._wcs, output_wcs=img._wcs, 
+                        shape_out=img._shape, verbose=verbose)
+                    img._mask_manual = mask_manual | mask_adapt
+
+            mb.on_close(event)
+        
+        img_ref = self[image_index]
+
+        # Start to work
+        mask = getattr(img_ref, '_mask_contaminant', None)
+        if mask is None:
+            mask = np.zeros_like(img_ref._data_subbkg, dtype=bool)
+
+        mask_new = np.zeros_like(mask, dtype=bool)
+        #if getattr(self, '_mask_manual', None) is None:
+        #    self._mask_manual = np.zeros_like(mask, dtype=bool)
+
+        fig, axs = plt.subplots(2, 2, figsize=(14, 14), sharex=True, sharey=True)
+        fig.subplots_adjust(wspace=0.05, hspace=0.1)
+
+        mb = MaskBuilder_draw(img_ref._data_subbkg, mask, mask_manual=mask_new,
+                              ipy=ipy, fig=fig, axs=axs, verbose=verbose)
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        fig.canvas.mpl_connect('key_press_event', on_press)
+        fig.canvas.mpl_connect('close_event', on_close)
+        plt.show()
+
+    def plot_atlas(self, ncols=1, data_type='data', show_info:str=None,
+                   show_units:str=None, show_mask_target=False, 
+                   text_kwargs=None, fig=None, axs=None, norm_kwargs=None, 
+                   interactive=False, verbose=False):
         '''
         Plot the image atlas.
+
+        Parameters
+        ----------
+        ncols : int (default: 1)
+            Number of columns to plot.
+        data_type : string (default: 'data')
+            The attribute name to be plotted. The attribute is '_{data_type}'.
+        show_info (optional) : string {`shape`, `size`}
+            Show the size of the images in pixel or physical scales.
+        show_units (optional) : string
+            The units of the image scale. If not provided, it is assumed to be 
+            in arcsec. It will only be used when `show_info=size`.
+        show_mask_target : bool (default: False)
+            Plot the target mask if True.
+        text_kwargs (optional) : dict
+            The parameters of ax.text() if `show_info` is used.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axis
+            The axes for plotting.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         '''
         if interactive:
             ipy = get_ipython()
@@ -3204,6 +3506,9 @@ class Atlas(object):
             if data_type == 'data_match':
                 x = self._data_match[loop]
                 pixel_scale = self._pxs_match
+            elif data_type == 'vars_match':
+                x = self._vars_match[loop]
+                pixel_scale = self._pxs_match
             else:
                 x = getattr(img, f'_{data_type}', None)
                 assert x is not None, f'Cannot find the data type ({data_type})!'
@@ -3218,9 +3523,10 @@ class Atlas(object):
 
             if show_mask_target:
                 assert hasattr(self, '_mask_target'), 'Please use set_mask_match() to set a mask first!'
-                xlim = ax.get_xlim();
+                xlim = ax.get_xlim()
                 ylim = ax.get_ylim()
-                plot_mask_contours(self._mask_target, ax=ax, color='magenta', lw=0.5)
+                plot_mask_contours(self._mask_target, verbose=verbose, ax=ax, 
+                                   color='magenta', lw=0.5)
                 ax.set_xlim(xlim)
                 ax.set_ylim(ylim)
 
@@ -3229,7 +3535,7 @@ class Atlas(object):
                     ax.text(0.05, 0.05, f'Shape: {x.shape}', ha='left',
                             va='bottom', transform=ax.transAxes, **text_kwargs)
 
-                if show_info == 'size':
+                elif show_info == 'size':
                     if show_units is not None:
                         size_y, size_x = np.array(x.shape) * pixel_scale * units.arcsec
                         size_x = size_x.to_value(show_units)
@@ -3242,10 +3548,28 @@ class Atlas(object):
                         ax.text(0.05, 0.05, f'Size: ({size_x:.0f}, {size_y:.0f}) arcsec',
                                 transform=ax.transAxes, va='bottom', ha='left', **text_kwargs)
 
-    def plot_single_image(self, image_index, fig=None, axs=None,
+                else:
+                    raise KeyError(f'Cannot recognize show_info ({show_info})!')
+
+    def plot_single_image(self, image_index:int, fig=None, axs=None,
                           norm_kwargs=None, interactive=False, verbose=False):
         '''
         Plot single images.
+
+        Parameters
+        ----------
+        image_index : int
+            The image index.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Three panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
         '''
         img = self._image_list[image_index]
 
@@ -3298,7 +3622,16 @@ class Atlas(object):
 
     def remove_background(self, box_fraction=0.02, filter_size=3, verbose=False):
         '''
-        Remove the background.
+        Remove the background of all images.
+
+        Parameters
+        ----------
+        box_fraction : float (default: 0.02)
+            The box size of the background model as a fraction of the image size.
+        filter_size : int (default: 3)
+            The filter size of the background model.
+        verbose : bool (default: False)
+            Show details if True.
         '''
         for loop, img in enumerate(self._image_list):
             if verbose:
@@ -3321,9 +3654,18 @@ class Atlas(object):
         self._ra_deg = c_sky.ra.deg
         self._dec_deg = c_sky.dec.deg
 
-    def save_match(self, filename, overwrite=False):
+    def save_match(self, filename, overwrite=False, wavelength_unit='micron'):
         '''
         Save the matched images.
+
+        Parameters
+        ----------
+        filename : string
+            The file name to save the data.
+        overwrite : bool (default: False)
+            Overwrite the existing data if True.
+        wavelength_unit : string (default: `micron`)
+            The unit of the wavelength data.
         '''
         now = datetime.now()
         header = self._wcs_match.to_header()
@@ -3337,10 +3679,36 @@ class Atlas(object):
         header['COMMENT'] = f'Reduced by PIXSED on {now.strftime("%d/%m/%YT%H:%M:%S")}'
 
         hduList = [fits.PrimaryHDU(header=header)]
-        for loop, (img, dat) in enumerate(zip(self._image_list, self._data_match)):
-            header_img = header.copy()
-            header_img['BAND'] = img._band
-            hduList.append(fits.ImageHDU(dat, header=header_img, name=f'IMAGE{loop}'))
+
+        cols = []
+        if self.band_list is not None:
+            cols.append(fits.Column(name='BAND', format='20A', array=self.band_list))
+        
+        if self.wavelength is not None:
+            wList = []
+            for w in self.wavelength:
+                if w is None:
+                    wList.append(-1)
+                else:
+                    wList.append(w.to(wavelength_unit).value)
+            cols.append(fits.Column(name='WAVELENGTH', format='1E', array=wList, 
+                                    unit=wavelength_unit))
+        
+        if len(cols) > 0:
+            hduList.append(fits.BinTableHDU.from_columns(cols, name='info'))
+
+        header = self._wcs_match.to_header()
+        for loop, (b, w) in enumerate(zip(self.band_list, self.wavelength)):
+            header[f'BAND_{loop}'] = b
+            header[f'WAVE_{loop}'] = f'{w}'
+        
+        image = np.array(self._data_match)
+        error = np.array(np.sqrt(self._vars_match))
+        hduList.append(fits.ImageHDU(data=image, header=header, name='image'))
+        hduList.append(fits.ImageHDU(data=error, header=header, name='error'))
+
+        header = self._wcs_match.to_header()
+        hduList.append(fits.ImageHDU(self._mask_galaxy_match.astype(int), header=header, name=f'mask_galaxy'))
 
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
