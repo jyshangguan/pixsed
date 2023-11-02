@@ -5,7 +5,10 @@ from astropy.io import fits
 import astropy.units as units
 from astropy.visualization import simple_norm
 from photutils.segmentation import SegmentationImage
-from .utils import plot_segment_contours, binmap_voronoi
+
+
+from .utils import plot_segment_contours
+from .utils_sed import binmap_voronoi, get_Galactic_Alambda
 
 class SED_cube(object):
     '''
@@ -27,6 +30,10 @@ class SED_cube(object):
         self._image = fits.getdata(filename, extname='image')
         self._error = fits.getdata(filename, extname='error')
         self._mask_galaxy = fits.getdata(filename, extname='mask_galaxy').astype(bool)
+        
+        # Useful information in the header
+        self._ra = self._header.get('RA', None)
+        self._dec = self._header.get('DEC', None)
         self._pxs = self._header['PSCALE']  # units: arcsec
         
         info = fits.getdata(filename, extname='info')
@@ -99,7 +106,8 @@ class SED_cube(object):
         axs[0].text(0.05, 0.95, ref_band, fontsize=18, color='w', 
                     transform=axs[0].transAxes, va='top', ha='left')
 
-    def collect_sed(self, calib_error=None):
+    def collect_sed(self, calib_error=None, A_V=0, model='F99', Rv='3.1', 
+                    verbose=True):
         '''
         Collect the SEDs. It generates _seds=dict(flux, error). 
         The flux and error have 2 dimensions of (nbands, nbins).
@@ -108,6 +116,12 @@ class SED_cube(object):
         ----------
         calib_error (optional) : 1D array
             The fraction of flux that will be added in quadrature to the error.
+        A_V : float (default: 0)
+            The A_V of the target.
+        model : {'F99' or 'CCM89'} (default: 'F99')
+            The extinction model.
+        Rv : string (default: '3.1')
+            The Rv of the extinction model.
         '''
         assert getattr(self, '_bin_info', None) is not None, 'Please generate the binned map first!'
         bin_num = self._bin_info['bin_num']
@@ -125,10 +139,30 @@ class SED_cube(object):
             assert len(calib_error) == self._nband, f'The calib_error should have {self._nband} elements!'
             error = np.sqrt(error**2 + (calib_error[:, np.newaxis] * flux)**2)
 
+        if A_V == 0:
+            if verbose:
+                print('No extinction correction is applied!')
+        elif A_V > 0:
+            A_lambda = get_Galactic_Alambda(self._wavelength, A_V, model=model, Rv=Rv)
+            f_corr = 10**(0.4 * A_lambda[:, np.newaxis])
+            flux *= f_corr
+            error *= f_corr
+        else:
+            raise ValueError('A negative A_V is not allowed!')
+
         self._seds = {
             'flux': flux,
             'error': error
         }
+
+    def correct_Galactic_extinction(self, A_V, model='F99', Rv='3.1'):
+        '''
+        Correct the Milky Way extinction.
+        '''
+        A_lambda = get_Galactic_Alambda(self._wavelength, A_V, model=model, Rv=Rv)
+
+
+
 
     def plot_sed(self, index, fig=None, axs=None, norm_kwargs=None, 
                  units_w='micron', units_f='Jy', verbose=False):
@@ -162,9 +196,7 @@ class SED_cube(object):
             fig.subplots_adjust(wspace=0.2)
 
         ax = axs[0]
-        ref_band = self._bin_info['ref_band']
-        idx = self.get_band_index(ref_band)
-        img = self._image[idx]
+        img = self._bin_info['image']
         if norm_kwargs is None:
             norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
         norm = simple_norm(img, **norm_kwargs)
@@ -173,8 +205,6 @@ class SED_cube(object):
         ax.plot(x, y, marker='x', ms=8, color='r')
         ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
         ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
-        ax.text(0.05, 0.95, ref_band, fontsize=18, color='w', 
-                transform=ax.transAxes, va='top', ha='left')
         
         ax = axs[1]
         w = self._wavelength.to(units_w).value

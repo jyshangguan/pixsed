@@ -8,7 +8,6 @@ from copy import deepcopy
 from datetime import datetime
 
 import astropy.units as units
-import extinction
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
