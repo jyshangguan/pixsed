@@ -153,13 +153,28 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
     return segm, bin_info
 
 
-def get_Galactic_Av(ra, dec, unit='degree', band='CTIO V', ref='A_SandF'):
+def get_Galactic_Av(ra, dec, band='CTIO V', ref='A_SandF'):
     '''
     Get the Milky Way extinction, Av, from IRSA Dust Extinction Service.
 
     https://astroquery.readthedocs.io/en/latest/ipac/irsa/irsa_dust/irsa_dust.html
+
+    Parameters
+    ----------
+    ra, dec : floats
+        The coordinate of the target, units: degree.
+    band : string (default: 'CTIO V')
+        The optical band name.
+    ref : string (default: 'A_SandF')
+        The measurement work. SandF stands for Schlafly & Finkbeiner (2011).
+        Refer to the full table to check the available data.
+        Return the full table if `ref=None`.
+    
+    Returns
+    -------
+    If `ref=None`, return the full querried table, otherwise, return the A_V value.
     '''
-    c = SkyCoord(ra=ra*units.Unit(unit), dec=dec*units.Unit(unit))
+    c = SkyCoord(ra=ra*units.degree, dec=dec*units.degree)
     tb = IrsaDust.get_extinction_table(c)
 
     if ref is None:
@@ -175,6 +190,7 @@ def get_Galactic_Av(ra, dec, unit='degree', band='CTIO V', ref='A_SandF'):
         else:
             Av = tb[ref][idx[0]]
             return Av
+
 
 def get_Galactic_Alambda(wavelength, A_V, model='F99', Rv='3.1'):
     '''
