@@ -1,12 +1,14 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from astropy import units
 from astropy.coordinates import SkyCoord
 from astropy.visualization import simple_norm
 from vorbin.voronoi_2d_binning import voronoi_2d_binning
 from astroquery.ipac.irsa.irsa_dust import IrsaDust
+from photutils.segmentation import SegmentationImage
 
-from .utils import plot_segment_contours
+from .utils import plot_segment_contours, plot_mask_contours
 
 
 def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True, 
@@ -50,6 +52,19 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
         Use the interactive plot if True.
     verbose : bool (default: True)
         Show details if True.
+
+    Returns
+    -------
+    bin_info : dict
+        image, noise, mask, target_sn : input parameters
+        segm : 2D array
+            The segmentation map of the binning.
+    axs : list of Axes
+        The plot axes.
+
+    Notes
+    -----
+    The generated segm is starts from 1, so the values are (bin_num + 1). 
     '''
     # Prepare the input of vorbin
     xi = np.arange(0, image.shape[1])
@@ -73,12 +88,19 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
     x_index = (xList - xmin).astype(int)
     y_index = (yList - ymin).astype(int)
 
+    nbins = np.max(results[0])+1
+    segm = np.zeros_like(image, dtype=int)
+    segm[mask] = results[0] + 1
+    cmap = rand_cmap(nbins+1, type='soft', first_color_white=True, verbose=False)
+
     bin_info = {
         'image': image,
         'noise': noise,
         'mask': mask,
+        'segm': segm,
+        'cmap': cmap,
         'target_sn': target_sn,
-        'nbins': np.max(results[0])+1,
+        'nbins': nbins,
         'bin_num': results[0],
         'x_index': x_index,
         'y_index': y_index,
@@ -89,10 +111,6 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
         'scale': results[7]
     }
     
-    segm = np.zeros_like(image, dtype=int)
-    segm[mask] = bin_info['bin_num']
-    #segm = SegmentationImage(segm)
-
     if plot:
         if interactive:
             ipy = get_ipython()
@@ -102,7 +120,11 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
                 ipy.run_line_magic('matplotlib', 'inline')
 
         if axs is None:
-            fig, axs = plt.subplots(1, 2, figsize=(14, 7))
+            fig = plt.figure(figsize=(16, 12))
+            ax0 = fig.add_axes([0.05, 0.5, 0.45, 0.45])
+            ax1 = fig.add_axes([0.5, 0.5, 0.45, 0.45])
+            ax2 = fig.add_axes([0.05, 0.05, 0.9, 0.30])
+            axs = [ax0, ax1, ax2]
         
         if interactive:
             fig.canvas.mpl_connect('close_event', on_close)
@@ -113,7 +135,13 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
 
         ax = axs[0]
         ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
-        plot_segment_contours(segm, ax=ax)
+        plot_segment_contours(segm, cmap=cmap, ax=ax, alpha=0.5)
+        ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
+        ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
+
+        ax = axs[1]
+        ax.imshow(segm, origin='lower', cmap=cmap)
+        plot_mask_contours(mask, ax=ax, color='k', verbose=verbose)
         ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
         ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
 
@@ -122,14 +150,14 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
                 label_kwargs['fontsize'] = 6
 
             if 'color' not in label_kwargs:
-                label_kwargs['color'] = 'cyan'
+                label_kwargs['color'] = 'k'
 
             for xb, yb in zip(x_bar, y_bar):
-                v = segm[int(yb), int(xb)]
+                v = segm[int(yb), int(xb)] - 1
                 ax.text(xb, yb, f'{v}', transform=ax.transData, ha='center', 
                         va='center', **label_kwargs)
-        
-        ax = axs[1]
+
+        ax = axs[2]
         r_input = np.sqrt(xList**2 + yList**2) * pixelsize
         snr_input = signal / noise
         ax.scatter(r_input, snr_input, color='k', s=20, label='Input S/N')
@@ -149,8 +177,8 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
         ax.minorticks_on()
         ax.set_xlabel(r'Radius (arcsec)', fontsize=24)
         ax.set_ylabel(r'S/N', fontsize=24)
-    
-    return segm, bin_info
+        
+    return bin_info, axs
 
 
 def get_Galactic_Av(ra, dec, band='CTIO V', ref='A_SandF'):
@@ -235,3 +263,76 @@ def get_Galactic_Alambda(wavelength, A_V, model='F99', Rv='3.1'):
     A_lambda = np.zeros(len(wavelength))
     A_lambda[fltr] = ext_model(wavelength[fltr]) * A_V
     return A_lambda
+
+
+def rand_cmap(nlabels, type='bright', first_color_white=True, last_color_white=False, verbose=True):
+    """
+    From : https://stackoverflow.com/questions/14720331/how-to-generate-random-colors-in-matplotlib
+
+    Creates a random colormap to be used together with matplotlib. Useful for segmentation tasks
+    :param nlabels: Number of labels (size of colormap)
+    :param type: 'bright' for strong colors, 'soft' for pastel colors
+    :param first_color_white: Option to use first color as white, True or False
+    :param last_color_white: Option to use last color as white, True or False
+    :param verbose: Prints the number of labels and shows the colormap. True or False
+    :return: colormap for matplotlib
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    import colorsys
+    import numpy as np
+
+
+    if type not in ('bright', 'soft'):
+        print ('Please choose "bright" or "soft" for type')
+        return
+
+    if verbose:
+        print('Number of labels: ' + str(nlabels))
+
+    # Generate color map for bright colors, based on hsv
+    if type == 'bright':
+        randHSVcolors = [(np.random.uniform(low=0.0, high=1),
+                          np.random.uniform(low=0.2, high=1),
+                          np.random.uniform(low=0.9, high=1)) for i in range(nlabels)]
+
+        # Convert HSV list to RGB
+        randRGBcolors = []
+        for HSVcolor in randHSVcolors:
+            randRGBcolors.append(colorsys.hsv_to_rgb(HSVcolor[0], HSVcolor[1], HSVcolor[2]))
+
+        if first_color_black:
+            randRGBcolors[0] = [0, 0, 0]
+
+        if last_color_black:
+            randRGBcolors[-1] = [0, 0, 0]
+
+        random_colormap = LinearSegmentedColormap.from_list('new_map', randRGBcolors, N=nlabels)
+
+    # Generate soft pastel colors, by limiting the RGB spectrum
+    if type == 'soft':
+        low = 0.6
+        high = 0.95
+        randRGBcolors = [(np.random.uniform(low=low, high=high),
+                          np.random.uniform(low=low, high=high),
+                          np.random.uniform(low=low, high=high)) for i in range(nlabels)]
+
+        if first_color_white:
+            randRGBcolors[0] = [1, 1, 1]
+
+        if last_color_white:
+            randRGBcolors[-1] = [1, 1, 1]
+        random_colormap = LinearSegmentedColormap.from_list('new_map', randRGBcolors, N=nlabels)
+
+    # Display colorbar
+    if verbose:
+        from matplotlib import colors, colorbar
+        from matplotlib import pyplot as plt
+        fig, ax = plt.subplots(1, 1, figsize=(15, 0.5))
+
+        bounds = np.linspace(0, nlabels, nlabels + 1)
+        norm = colors.BoundaryNorm(bounds, nlabels)
+
+        cb = colorbar.ColorbarBase(ax, cmap=random_colormap, norm=norm, spacing='proportional', ticks=None,
+                                   boundaries=bounds, format='%1i', orientation=u'horizontal')
+
+    return random_colormap

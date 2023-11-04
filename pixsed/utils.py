@@ -7,6 +7,7 @@ import numpy as np
 import numpy.ma as ma
 from copy import deepcopy
 import astropy.units as units
+import matplotlib
 import matplotlib.pyplot as plt
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats, gaussian_fwhm_to_sigma, SigmaClip
@@ -1648,7 +1649,7 @@ def plot_mask_contours(mask, ax=None, verbose=False, **plot_kwargs):
     return ax
 
 
-def plot_segment_contours(segm, ax=None, connectivity=8, verbose=False, **plot_kwargs):
+def plot_segment_contours(segm, ax=None, connectivity=8, verbose=False, cmap=None, **plot_kwargs):
     '''
     Plot the SegmentionImage in contours.
 
@@ -1660,6 +1661,7 @@ def plot_segment_contours(segm, ax=None, connectivity=8, verbose=False, **plot_k
     fltr = polygons[:, 1] > 0
     pList = polygons[fltr, 0]
     vList = polygons[fltr, 1]
+    vmax = np.max(vList)
 
     if verbose:
         print(f'Found {len(pList)} masks!')
@@ -1673,8 +1675,12 @@ def plot_segment_contours(segm, ax=None, connectivity=8, verbose=False, **plot_k
         xy_poly = np.c_[poly.exterior.xy]
 
         kwargs = plot_kwargs.copy()
-        if ('c' not in plot_kwargs) & ('color' not in plot_kwargs):
+        if cmap is not None:
+            kwargs['c'] = cmap(v/vmax)
+
+        if ('c' not in kwargs) & ('color' not in kwargs):
             kwargs['c'] = f'C{int(v%10)}'
+
         x = xy_poly[:, 0] - 0.5
         y = xy_poly[:, 1] - 0.5
         ax.plot(x, y, **kwargs)
