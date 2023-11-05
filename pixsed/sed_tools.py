@@ -6,6 +6,8 @@ from astropy.io import fits
 import astropy.units as units
 from astropy.visualization import simple_norm
 from photutils.segmentation import SegmentationImage
+import dill as pickle
+from pathlib import Path
 
 from sedpy.observate import load_filters
 from prospect.utils.obsutils import fix_obs
@@ -15,14 +17,20 @@ from prospect.fitting import lnprobfn, fit_model
 
 
 from .utils import plot_segment_contours
-from .utils_sed import binmap_voronoi, get_Galactic_Alambda
+from .utils_sed import (plot_bin_image, plot_bin_segm, plot_Prospector_SED, plot_fit_output)
+from .utils_sed import (binmap_voronoi, get_Galactic_Alambda, 
+                        fit_SED_Prospector, get_Params_Prospector, 
+                        get_Samples_Prospector, get_BestFit_Prospector, 
+                        gen_image_phys, gen_image_density)
+#from prospect.io import write_results as writer
+
 
 class SED_cube(object):
     '''
     The class of a data cube.
     '''
 
-    def __init__(self, filename) -> None:
+    def __init__(self, filename, temp_path='./temp') -> None:
         '''
         Parameters
         ----------
@@ -37,6 +45,10 @@ class SED_cube(object):
         self._image = fits.getdata(filename, extname='image')
         self._error = fits.getdata(filename, extname='error')
         self._mask_galaxy = fits.getdata(filename, extname='mask_galaxy').astype(bool)
+
+        # Create the temp path
+        self._temp_path = temp_path
+        Path(f'{temp_path}').mkdir(parents=True, exist_ok=True)
         
         # Useful information in the header
         self._ra = self._header.get('RA', None)
@@ -51,7 +63,7 @@ class SED_cube(object):
 
     def binmap_voronoi(self, target_sn, bin_ref, cvt=True, wvt=True, 
                        sn_func=None, plot=False, fig=None, axs=None, 
-                       norm_kwargs=None, label_kwargs=None, interactive=False, 
+                       norm_kwargs=None, label_kwargs={}, interactive=False, 
                        verbose=False):
         '''
         Bin the image with the voronoi method.
@@ -194,6 +206,48 @@ class SED_cube(object):
 
         return img_ave, err_ave
 
+    def gen_bin_phys(self):
+        '''
+        Generate the list of physical parameter for the bins.
+        '''
+        nbins = self._bin_info['nbins']
+        best_phys = self._fit_outputs['bin0']['phy_params']
+        parnames = list(best_phys.keys())
+        bin_phys = {}
+
+        for loop in range(nbins):
+            if loop == 0:
+                for pn in parnames:
+                    bin_phys[pn] = [best_phys[pn]]
+            else:
+                best_phys = self._fit_outputs[f'bin{loop}']['phy_params']
+                for pn in parnames:
+                    bin_phys[pn].append(best_phys[pn])
+
+        self._bin_phys = bin_phys
+
+    def gen_image_density(self, pixel_to_area=None):
+        '''
+        Generate the density map with the physical parameters from the SED 
+        fitting.
+        '''
+        if pixel_to_area is None:
+            raise NotImplementedError('To be done...')
+        
+        self._image_density = {}
+        for pn in ['logmstar', 'sfr', 'logmdust']:
+            self._image_density[pn] = gen_image_density(
+                pn, self._bin_info, self._bin_phys, pixel_to_area)
+
+    def gen_image_phys(self):
+        '''
+        Generate the maps with the physical parameters from the SED fitting.
+        '''
+        self._image_phys = {}
+
+        for pn in self._bin_phys.keys():
+            self._image_phys[pn] = gen_image_phys(pn, self._bin_info, self._bin_phys)
+
     def get_band_index(self, band):
         '''
         Get the index of the band in the cube.
@@ -211,175 +265,110 @@ class SED_cube(object):
         idx = self._band.index(band)
         return idx
 
-    def fit_allsed_prospector(self, bands, redshift, unc_add=0.1, 
+    def fit_allsed_prospector(self, bands, redshift, lumdist=None, unc_add=0.1, 
                               model_params=None, noise_model=None, sps=None, 
                               optimize=False, emcee=False, dynesty=True, 
-                              fitting_kwargs=None, ncpu=1, print_progress=True): 
+                              fitting_kwargs=None, ncpu=1, print_progress=True,
+                              verbose=True, debug=False): 
         '''
         Fit all the binned SEDs.
         '''
+        nbins = self._bin_info['nbins']
         if print_progress:
-            rIndex = tqdm(range(self._bin_info['nbins']))
+            rIndex = tqdm(range(nbins))
         else:
-            rIndex = range(self._bin_info['nbins'])
+            rIndex = range(nbins)
 
         func = lambda x : self.fit_sed_prospector(
-            x, bands=bands, redshift=redshift, unc_add=unc_add, 
+            x, bands=bands, redshift=redshift, lumdist=lumdist, unc_add=unc_add, 
             model_params=model_params, noise_model=noise_model, sps=sps, 
             optimize=optimize, emcee=emcee, dynesty=dynesty, 
-            fitting_kwargs=fitting_kwargs, skip_fit=False, print_progress=False, 
-            plot=False, verbose=False)
+            fitting_kwargs=fitting_kwargs, print_progress=False, 
+            plot=False, verbose=verbose, debug=debug)
 
         if ncpu > 1:
             from multiprocess import Pool
             pool = Pool(ncpu)
-            pool.map(func, rIndex)
+            results = pool.map(func, rIndex)
         else:
-            for idx in rIndex:
-                func(idx)
+            results = [func(idx) for idx in rIndex]
 
-    def fit_sed_prospector(self, index, bands, redshift, unc_add=0.1, 
+        self._fit_outputs = dict(zip([f'bin{idx}' for idx in range(nbins)], results))
+
+    def fit_sed_prospector(self, index, bands, redshift, lumdist=None, unc_add=0.1, 
                            model_params=None, noise_model=None, sps=None,
                            optimize=False, emcee=False, dynesty=True, 
-                           fitting_kwargs=None, skip_fit=False, 
-                           print_progress=True, plot=False, fig=None, axs=None, 
-                           norm_kwargs=None, verbose=False): 
+                           fitting_kwargs=None, print_progress=True, plot=False, 
+                           fig=None, axs=None, norm_kwargs=None, 
+                           units_x='micron', verbose=False, debug=False): 
         '''
         Fit one SED with Prospector.
+
+        Parameters
+        ----------
+        index : int
+            The bin index.
+        bands : list of str
+            The bands of the SED.
+        redshift : float
+            The redshift of the source.
+        lumdist (optional) : float
+            The luminosity distance of the source, units: Mpc. If not provided, 
+            Prospector will use the redshift to calculate the lumdist.
+        unc_add : float (default: 0.1)
+            The 
         '''
         assert getattr(self, '_seds', None) is not None, 'Please run collect_sed first!'
 
-        # Prepare the observation
-        filters = load_filters([f'{b}' for b in bands])
+        if verbose:
+            print(f'Fit bin {index}!')
+
+        if debug:
+            return index
+        
         maggies = self._seds['flux'][:, index] / 3631  # converted to maggies
         maggies_unc = self._seds['error'][:, index] / 3631
         maggies_unc = np.sqrt(maggies_unc**2 + (unc_add * maggies)**2)
-        obs = dict(wavelength=None, spectrum=None, unc=None, redshift=redshift,
-                   maggies=maggies, maggies_unc=maggies_unc, filters=filters)
-        obs = fix_obs(obs)
+        output, obs, model, sps = fit_SED_Prospector(
+            bands, maggies=maggies, maggies_unc=maggies_unc, redshift=redshift, 
+            lumdist=lumdist, model_params=model_params, noise_model=noise_model, 
+            sps=sps, optimize=optimize, emcee=emcee, dynesty=dynesty, 
+            fitting_kwargs=fitting_kwargs, print_progress=print_progress)
 
-        # Prepare the model
-        if model_params is None:
-            model_params = TemplateLibrary["parametric_sfh"]
-            model_params['mass']['prior'].update(mini=1e4, maxi=1e11)
-        model_params["zred"]["init"] = obs["redshift"]  # Always needed?
-        model = SpecModel(model_params)
+        btheta = get_BestFit_Prospector(output, model=model)
+        spec, phot, _ = model.predict(btheta, obs=obs, sps=sps)
 
-        if noise_model is None:
-            noise_model = (None, None)
-        
-        if sps is None:
-            from prospect.sources import CSPSpecBasis
-            sps = CSPSpecBasis(zcontinuous=1)
+        swave = sps.wavelengths * (1 + redshift)
+        pwave = np.array([f.wave_effective for f in obs["filters"]])
 
-        if skip_fit:
-            assert getattr(self, '_fit_output', None) is not None, 'Cannot skip the fit without the _fit_output!'
-        else:
-            if fitting_kwargs is None:
-                fitting_kwargs = dict(nlive_init=400, nested_sample="rwalk", 
-                                      nested_target_n_effective=1000, 
-                                      nested_dlogz_init=0.05)
-            fitting_kwargs['print_progress'] = print_progress
+        phy_params = get_Params_Prospector(btheta, model=model, sps=sps)
+        phy_samples = get_Samples_Prospector(output, model=model, sps=sps)
 
-            output = fit_model(
-                obs, model, sps, optimize=optimize, emcee=emcee, dynesty=dynesty, 
-                lnprobfn=lnprobfn, noise=noise_model, **fitting_kwargs)
-            
-            results = output['sampling'][0]
-            lnprob = results['logl'] + model.prior_product(results.samples, nested=True),
-            btheta = results.samples[np.argmax(lnprob), :]
-            spec, phot, _ = model.predict(btheta, obs=obs, sps=sps)
+        # Save fitting results
+        output_name = f'{self._temp_path}/temp_bin{index}.dill'
+        pd = dict(obs=obs, sps=sps, model=model, output=output, phy_samples=phy_samples)
+        with open(output_name, 'wb') as f:
+            pickle.dump(pd, f)
 
-            swave = sps.wavelengths * (1 + redshift)
-            pwave = np.array([f.wave_effective for f in obs["filters"]])
-
-            if 'add_agn_dust' in model.params:
-                theta_noagn = btheta.copy()
-                theta_noagn[model.free_params.index('fagn')] = 0
-                spec_noagn, _, _ = model.predict(theta_noagn, obs=obs, sps=sps)
-                spec_agn = spec - spec_noagn
-            else:
-                spec_agn = None
-
-            if getattr(self, '_fit_output', None) is None:
-                self._fit_output = {}
-
-            self._fit_output[f'bin{index}'] = dict(
-                obs = obs,
-                sps = sps,
-                model = model,
-                results = results, 
-                best_fit = dict(
-                    theta = btheta, 
-                    spec = (swave, spec),
-                    phot = (pwave, phot),
-                    spec_agn = spec_agn
-                )
-            )
+        fit_output = dict(
+            bin_index = index,
+            pwave = pwave,
+            swave = swave,
+            spec_best = spec,
+            phot_best = phot,
+            fit_params = dict(zip(model.free_params, btheta)),
+            phy_params = phy_params,
+            output_name = output_name, 
+        )
 
         if plot:
-            if axs is None:
-                fig = plt.figure(figsize=(14, 7))
-                ax0 = fig.add_axes([0.1, 0.1, 0.4, 0.8])
-                ax1 = fig.add_axes([0.58, 0.35, 0.35, 0.60])
-                ax2 = fig.add_axes([0.58, 0.05, 0.35, 0.30])
-                axs = [ax0, ax1, ax2]
-                ax2.sharex(ax1)
+            plot_fit_output(self._bin_info, fit_output, fig=fig, axs=axs, 
+                            norm_kwargs=norm_kwargs, units_x=units_x)
+        
+        return fit_output
 
-            ax = axs[0]
-            img = self._bin_info['image']
-            x = self._bin_info['x_bar'][index]
-            y = self._bin_info['y_bar'][index]
-
-            if norm_kwargs is None:
-                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-            norm = simple_norm(img, **norm_kwargs)
-
-            ax.imshow(img, origin='lower', cmap='Greys_r', norm=norm)
-            plot_segment_contours(
-                self._bin_info['segm'], cmap=self._bin_info['cmap'], ax=ax, 
-                verbose=verbose)
-            ax.plot(x, y, marker='x', ms=8, color='r')
-            ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
-            ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
-            ax.text(0.05, 0.95, f'Bin: {index}', fontsize=18, color='k', 
-                    transform=ax.transAxes, va='top', ha='left')
-
-            ax = axs[1]
-            pwave, phot = self._fit_output[f'bin{index}']['best_fit']['phot']
-            swave, spec = self._fit_output[f'bin{index}']['best_fit']['spec']
-            pwave = pwave / 1e4
-            swave = swave / 1e4
-            ax.plot(pwave, maggies, marker='o', ls='none', color='k', label='Data')
-            ax.errorbar(pwave, maggies, yerr=maggies_unc, marker='o', ls='none', 
-                        color='k')
-            ax.plot(pwave, phot, linestyle='', marker='s', markersize=10, 
-                    mec='orange', mew=2, mfc='none', alpha=0.5, label='Model')
-            ax.plot(swave, spec, color='C3', label='Best fit')
-            
-            spec_agn = self._fit_output[f'bin{index}']['best_fit']['spec_agn']
-            if spec_agn is not None:
-                ax.plot(swave, spec_agn, color='gray', ls='--', label='Torus')
-
-            ax.set_xlim(pwave.min() * 0.1, pwave.max() * 5)
-            ax.set_ylim(maggies.min() * 0.1, maggies.max() * 5)
-            ax.set_xscale('log')
-            ax.set_yscale('log')
-            ax.set_ylabel(r'Flux (maggies)', fontsize=24)
-            ax.legend(loc='upper left', fontsize=16, ncols=1, handlelength=1)
-
-            ax = axs[2]
-            chi = (maggies - phot) / maggies_unc
-            ax.plot(pwave, chi, marker='o', ls='none', color='k')
-            ax.axhline(y=0, ls='--', color='k')
-            ax.set_xlabel(r'Wavelength (micron)', fontsize=24)
-            ax.set_ylabel(r'Res. ($\sigma$)', fontsize=24)
-            ax.set_ylim([-4.5, 4.5])
-            ax.set_yticks([-3, 0, 3])
-            ax.minorticks_on()
-
-    def plot_sed(self, index, fig=None, axs=None, norm_kwargs=None, 
-                 units_w='micron', units_f='Jy', verbose=False):
+    def plot_sed(self, index, fig=None, axs=None, units_w='micron', 
+                 units_f='Jy', label_kwargs={}):
         '''
         Plot the SED of a selected bin.
 
@@ -407,33 +396,21 @@ class SED_cube(object):
 
         if axs is None:
             fig, axs = plt.subplots(1, 2, figsize=(14, 7))
-            fig.subplots_adjust(wspace=0.2)
+            fig.subplots_adjust(wspace=0.25)
 
-        ax = axs[0]
-        img = self._bin_info['image']
-        if norm_kwargs is None:
-            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
-        norm = simple_norm(img, **norm_kwargs)
-        ax.imshow(img, origin='lower', cmap='Greys_r', norm=norm)
-        plot_segment_contours(
-            self._bin_info['segm'], cmap=self._bin_info['cmap'], ax=ax, 
-            verbose=verbose)
-        ax.plot(x, y, marker='x', ms=8, color='r')
-        ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
-        ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
+        plot_bin_segm(self._bin_info, highlight_index=index, fig=fig, 
+                       ax=axs[0], label_kwargs=label_kwargs)
         
         ax = axs[1]
         w = self._wavelength.to(units_w).value
         ax.errorbar(w, flux, yerr=error, marker='o', mec='k', mfc='none', color='k')
-        ax.text(0.05, 0.95, f'Bin: {index}', fontsize=18, color='k', 
-                transform=ax.transAxes, va='top', ha='left')
         ax.set_xscale('log')
         ax.set_yscale('log')
         ax.set_xlabel(f'Wavelength ({units_w})', fontsize=24)
         ax.set_ylabel(f'Flux ({units_f})', fontsize=24)
 
-    def plot_seds(self, indices:list, fig=None, axs=None, norm_kwargs=None, 
-                  units_w='micron', units_f='Jy', verbose=False):
+    def plot_seds(self, indices:list, fig=None, axs=None, units_w='micron', 
+                  units_f='Jy', label_kwargs={}):
         '''
         Plot a list of SEDs.
         '''
@@ -448,8 +425,8 @@ class SED_cube(object):
         ylimList = []
         for loop, idx in enumerate(indices):
             index = idx % nbins
-            self.plot_sed(index, fig=fig, axs=axs[loop, :], norm_kwargs=norm_kwargs, 
-                          units_w=units_w, units_f=units_f, verbose=verbose)
+            self.plot_sed(index, fig=fig, axs=axs[loop, :], units_w=units_w, 
+                          units_f=units_f, label_kwargs=label_kwargs)
             ylimList.append(axs[loop, 1].get_ylim())
 
             if loop > 0:
@@ -461,3 +438,4 @@ class SED_cube(object):
                 axs[loop, 0].set_xticklabels([])
                 axs[loop, 1].set_xticklabels([])
         axs[0, 1].set_ylim(np.min(ylimList), np.max(ylimList))
+
