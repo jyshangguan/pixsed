@@ -1342,7 +1342,7 @@ def get_masked_patch(data, mask, coord_pix, factor=1, plot=False, axs=None,
     return data_s, bounds
 
 
-def image_photometry(image, aperture, calibration_uncertainty,
+def image_photometry(image, aperture, calibration_uncertainty=None,
                      mask=None, bkgsub=True, rannu_in=1.25, rannu_out=1.60,
                      error=True, nsample=300,
                      area_sample=(0.02, 0.04, 0.08, 0.16, 0.32),
@@ -1449,15 +1449,110 @@ def image_photometry(image, aperture, calibration_uncertainty,
     else:
         return phot_bkgsub
 
+def multi_apertures_photometry(image, apertures, calibration_uncertainty=None,
+                     mask=None, bkgsub=True, rannu_in=1.25, rannu_out=1.60,
+                     error=True, nsample=300,
+                     area_sample=(0.02, 0.04, 0.08, 0.16, 0.32),
+                     plot=False, ax=None, norm_kwargs=None):
+    '''
+    Multi-apertures photometry on one image.
 
-def error_curve_fit(area, noise, plot=False):
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    apertures : a list of EllipticalAperture
+        The elliptical apertures to measure the image. The first element should be master apertures
+    mask (optional) : 2D array
+        The mask of the contaminants.
+    rannu_in, rannu_out : float (default: 1.25, 1.60)
+        The inner and outer annulus semimajor axes, units: pixel. The values
+        follow Clark et al. (2017).
+    plot : bool (default: False)
+        Plot the results.
+    ax : Axis
+        The axis to plot.
+    norm_kwargs (optional) : dict
+        The keywords to normalize the data image.
+
+    Returns
+    -------
+    phot_bkgsub, sigma :array
+        The flux and the error.
+    '''
+    aperture = apertures[0]
+
+    annulus = EllipticalAnnulus(aperture.positions,
+                                a_in=aperture.a * rannu_in,
+                                a_out=aperture.a * rannu_out,
+                                b_in=aperture.b * rannu_in,
+                                b_out=aperture.b * rannu_out,
+                                theta=aperture.theta)
+    mask_nan = np.isnan(image)
+    if mask is not None:
+        mask = mask | mask_nan
+    else:
+        mask = mask_nan
+    phot_tb = []
+    for aper in apertures:
+        phot_table = aperture_photometry(image, aper, mask=mask)
+        phot_tb.append(phot_table['aperture_sum'][0])
+    apertures_area = np.array([aper.area_overlap(image, mask=mask) for aper in apertures])
+
+    if bkgsub:
+        aperstats = ApertureStats(image, annulus)
+        total_bkg = aperstats.mean * apertures_area
+        phot_bkgsub = np.array([phot_tb[i] - total_bkg[i] for i in range(len(apertures))])
+    else:
+        phot_bkgsub = np.array([phot_tb[i] for i in range(len(apertures))])
+
+    if error:
+        sigma_box = []
+        if area_sample is not None:
+            for i in range(len(area_sample)):
+                sample_box = []
+                aper_list = gen_random_apertures(image, nsample=nsample, mask_aper=aperture, mask=mask,
+                                                 percent=area_sample[i])
+                for j in range(len(aper_list)):
+                    phot_table = aperture_photometry(image, aper_list[j])
+                    sample_box.append(phot_table['aperture_sum'][0])
+                sigma_t = np.std(np.array(sample_box))
+                sigma_box.append(sigma_t)
+            sigma = np.array([error_curve_fit(area_sample, sigma_box, standard_area=apertures_area[i]/apertures_area[0])
+                              for i in range(len(apertures_area))])
+            if calibration_uncertainty is not None:
+                sigma = np.array([math.sqrt(i) for i in (sigma ** 2 + (phot_bkgsub * calibration_uncertainty) ** 2)])
+        else:
+            if calibration_uncertainty is not None:
+                sigma = phot_bkgsub * calibration_uncertainty
+
+    if plot:
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(7, 7))
+
+        if norm_kwargs is None:
+            norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.0001)
+        norm = simple_norm(image, **norm_kwargs)
+
+        ax.imshow(image, origin='lower', cmap='Greys_r', norm=norm)
+
+        apertures.plot(ax=ax, color='cyan', lw=1.5, label='Photometry')
+        annulus.plot(ax=ax, color='cyan', ls='--', lw=1.0, label='Background')
+        ax.legend(loc='upper right', fontsize=16)
+
+    if error:
+        return phot_bkgsub, sigma
+    else:
+        return phot_bkgsub
+
+def error_curve_fit(area, noise, standard_area=1, plot=False):
     log_area = np.array([math.log10(i) for i in area])
     log_noise = np.array([math.log10(i) for i in noise])
     curve = np.polyfit(log_area, log_noise, 1)
     slope = curve[0]
     intercept = curve[1]
 
-    log_ans = intercept
+    log_ans = intercept + slope * math.log10(standard_area)
     ans = 10 ** log_ans
 
     if plot:
