@@ -150,24 +150,8 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
 
         plot_bin_image(bin_info, fig=fig, ax=axs[0], norm_kwargs=norm_kwargs)
         plot_bin_segm(bin_info, fig=fig, ax=axs[1], label_kwargs=label_kwargs)
-
-        #ax = axs[1]
-        #ax.imshow(segm, origin='lower', cmap=cmap)
-        #plot_mask_contours(mask, ax=ax, color='k', verbose=verbose)
-        #ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
-        #ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
-
-        #if label_kwargs is not None:
-        #    if 'fontsize' not in label_kwargs:
-        #        label_kwargs['fontsize'] = 6
-
-        #    if 'color' not in label_kwargs:
-        #        label_kwargs['color'] = 'k'
-
-        #    for xb, yb in zip(x_bar, y_bar):
-        #        v = segm[int(yb), int(xb)] - 1
-        #        ax.text(xb, yb, f'{v}', transform=ax.transData, ha='center', 
-        #                va='center', **label_kwargs)
+        axs[1].text(0.05, 0.95, f'Total bins: {nbins}', fontsize=16, 
+                    transform=axs[1].transAxes, ha='left', va='top')
 
         ax = axs[2]
         r_input = np.sqrt(xList**2 + yList**2) * pixelsize

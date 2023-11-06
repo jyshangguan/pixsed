@@ -274,10 +274,6 @@ class SED_cube(object):
         Fit all the binned SEDs.
         '''
         nbins = self._bin_info['nbins']
-        if print_progress:
-            rIndex = tqdm(range(nbins))
-        else:
-            rIndex = range(nbins)
 
         func = lambda x : self.fit_sed_prospector(
             x, bands=bands, redshift=redshift, lumdist=lumdist, unc_add=unc_add, 
@@ -289,9 +285,15 @@ class SED_cube(object):
         if ncpu > 1:
             from multiprocess import Pool
             pool = Pool(ncpu)
-            results = pool.map(func, rIndex)
+            if print_progress:
+                results = list(tqdm(pool.imap(func, range(nbins)), total=nbins))
+            else:
+                results = pool.map(func, range(nbins))
         else:
-            results = [func(idx) for idx in rIndex]
+            if print_progress:
+                results = [func(idx) for idx in tqdm(range(nbins))]
+            else:
+                results = [func(idx) for idx in range(nbins)]
 
         self._fit_outputs = dict(zip([f'bin{idx}' for idx in range(nbins)], results))
 
