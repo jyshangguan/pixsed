@@ -2430,7 +2430,8 @@ class Image(object):
                                 plot=False, axs=None, **segm_kwargs):
         aper = gen_aperture_ellipse(self._data_clean, self._coord_pix, threshold_segm=threshold_segm,
                                     threshold_snr=threshold_snr, psf_fwhm=self._psf_fwhm_pix,
-                                    mask=self._mask_contaminant, grid_num=grid_num, naper=naper, fracs=fracs,
+                                    mask=None, grid_mask=self._mask_contaminant,
+                                    grid_num=grid_num, naper=naper, fracs=fracs,
                                     plot=plot, axs=axs, **segm_kwargs)
         self._phot_aper = aper
         return aper
