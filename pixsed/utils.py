@@ -799,7 +799,7 @@ def find_aperture_bounds(image, aper_ref, mask=None, naper=10, threshold_snr=2,
 
 
 def gen_aperture_ellipse(image, coord_pix, threshold_segm, psf_fwhm, threshold_snr=2,
-                         mask=None, naper=20, fracs=[1, 5], plot=False, axs=None,
+                         mask=None, grid_num=8, naper=20, fracs=[1, 5], plot=False, axs=None,
                          **segm_kwargs):
     '''
     Generate elliptical aperture.
@@ -820,6 +820,8 @@ def gen_aperture_ellipse(image, coord_pix, threshold_segm, psf_fwhm, threshold_s
         A boolean mask, with the same shape as the input data, where True
         values indicate masked pixels. Masked pixels will not be included in
         any source.
+    grid_num: int (default:8)
+        The number of grids in a row or column of an image, used to estimate large-scale rms.
     naper : int (default: 20)
         The number of apertures sampled in the first step search.
     fracs : list (default: [1, 5])
@@ -861,8 +863,21 @@ def gen_aperture_ellipse(image, coord_pix, threshold_segm, psf_fwhm, threshold_s
             intens_rms.append(stats.mad_std)
             area.append(stats.sum_aper_area.value)
 
+        sep_num = grid_num
+        x1 = np.shape(image)[0]//sep_num
+        x2 = np.shape(image)[1]//sep_num
+        mea_box = []
+        for row in range(math.floor(sep_num)):
+            for col in range(math.floor(sep_num)):
+                ma_data = np.ma.array(image[row*x1:(row+1)*x1, col*x2:(col+1)*x2], mask=mask[row*x1:(row+1)*x1, col*x2:(col+1)*x2])
+                pix_num = x1*x2 - mask[row*x1:(row+1)*x1, col*x2:(col+1)*x2].sum()
+                if isinstance(ma_data.sum()/pix_num, float) is False:
+                    continue
+                mea_box.append(ma_data.sum()/pix_num)
+        macro_rms = np.std(ma_data.sum()/pix_num)
+
         intens = np.array(intens)
-        intens_rms = np.array(intens_rms) / np.sqrt(area)
+        intens_rms = np.array(intens_rms) / np.sqrt(area) + macro_rms
         snr = intens / intens_rms
         snr_sub = (snr - threshold_snr)
 
