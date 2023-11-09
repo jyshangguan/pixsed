@@ -21,7 +21,8 @@ from .utils_sed import (plot_bin_image, plot_bin_segm, plot_Prospector_SED, plot
 from .utils_sed import (binmap_voronoi, get_Galactic_Alambda, 
                         fit_SED_Prospector, get_Params_Prospector, 
                         get_Samples_Prospector, get_BestFit_Prospector, 
-                        gen_image_phys, gen_image_density)
+                        get_Models_Prospector, gen_image_phys, 
+                        gen_image_density) 
 #from prospect.io import write_results as writer
 
 
@@ -30,8 +31,30 @@ class SED_cube(object):
     The class of a data cube.
     '''
 
-    def __init__(self, filename, temp_path='./temp') -> None:
+    def __init__(self, filename=None, temp_path='./temp') -> None:
         '''
+        Parameters
+        ----------
+        filename : string
+            The file name of the SED data cube.
+        temp_path : strong
+            The path to save temperary files.
+
+        Notes
+        -----
+        FIXME: doc
+        '''
+        # Create the temp path
+        self._temp_path = temp_path
+        Path(f'{temp_path}').mkdir(parents=True, exist_ok=True)
+
+        if filename is not None:
+            self.load_cube(filename)
+
+    def load_cube(self, filename):
+        '''
+        Load the image cube data.
+        
         Parameters
         ----------
         filename : string
@@ -45,10 +68,6 @@ class SED_cube(object):
         self._image = fits.getdata(filename, extname='image')
         self._error = fits.getdata(filename, extname='error')
         self._mask_galaxy = fits.getdata(filename, extname='mask_galaxy').astype(bool)
-
-        # Create the temp path
-        self._temp_path = temp_path
-        Path(f'{temp_path}').mkdir(parents=True, exist_ok=True)
         
         # Useful information in the header
         self._ra = self._header.get('RA', None)
@@ -184,6 +203,110 @@ class SED_cube(object):
             'error': error
         }
 
+    def fit_allsed_prospector(self, bands, redshift, lumdist=None, unc_add=0.1, 
+                              model_params=None, noise_model=None, sps=None, 
+                              optimize=False, emcee=False, dynesty=True, 
+                              fitting_kwargs=None, ncpu=1, print_progress=True,
+                              verbose=True, debug=False): 
+        '''
+        Fit all the binned SEDs.
+        '''
+        nbins = self._bin_info['nbins']
+
+        func = lambda x : self.fit_sed_prospector(
+            x, bands=bands, redshift=redshift, lumdist=lumdist, unc_add=unc_add, 
+            model_params=model_params, noise_model=noise_model, sps=sps, 
+            optimize=optimize, emcee=emcee, dynesty=dynesty, 
+            fitting_kwargs=fitting_kwargs, print_progress=False, 
+            plot=False, verbose=verbose, debug=debug)
+
+        if ncpu > 1:
+            from multiprocess import Pool
+            pool = Pool(ncpu)
+            if print_progress:
+                results = list(tqdm(pool.imap(func, range(nbins)), total=nbins))
+            else:
+                results = pool.map(func, range(nbins))
+        else:
+            if print_progress:
+                results = [func(idx) for idx in tqdm(range(nbins))]
+            else:
+                results = [func(idx) for idx in range(nbins)]
+
+        self._fit_outputs = dict(zip([f'bin{idx}' for idx in range(nbins)], results))
+
+    def fit_sed_prospector(self, index, bands, redshift, lumdist=None, unc_add=0.1, 
+                           model_params=None, noise_model=None, sps=None,
+                           optimize=False, emcee=False, dynesty=True, 
+                           fitting_kwargs=None, print_progress=True, plot=False, 
+                           fig=None, axs=None, norm_kwargs=None, 
+                           units_x='micron', verbose=False, debug=False): 
+        '''
+        Fit one SED with Prospector.
+
+        Parameters
+        ----------
+        index : int
+            The bin index.
+        bands : list of str
+            The bands of the SED.
+        redshift : float
+            The redshift of the source.
+        lumdist (optional) : float
+            The luminosity distance of the source, units: Mpc. If not provided, 
+            Prospector will use the redshift to calculate the lumdist.
+        unc_add : float (default: 0.1)
+            The 
+        '''
+        assert getattr(self, '_seds', None) is not None, 'Please run collect_sed first!'
+
+        if verbose:
+            print(f'Fit bin {index}!')
+
+        if debug:
+            return index
+        
+        maggies = self._seds['flux'][:, index] / 3631  # converted to maggies
+        maggies_unc = self._seds['error'][:, index] / 3631
+        maggies_unc = np.sqrt(maggies_unc**2 + (unc_add * maggies)**2)
+        output, obs, model, sps = fit_SED_Prospector(
+            bands, maggies=maggies, maggies_unc=maggies_unc, redshift=redshift, 
+            lumdist=lumdist, model_params=model_params, noise_model=noise_model, 
+            sps=sps, optimize=optimize, emcee=emcee, dynesty=dynesty, 
+            fitting_kwargs=fitting_kwargs, print_progress=print_progress)
+
+        btheta = get_BestFit_Prospector(output, model=model)
+        #spec, phot, _ = model.predict(btheta, obs=obs, sps=sps)
+
+        #swave = sps.wavelengths * (1 + redshift)
+        #pwave = np.array([f.wave_effective for f in obs["filters"]])
+        model_seds = get_Models_Prospector(btheta, model=model, obs=obs, sps=sps)
+
+        phy_params = get_Params_Prospector(btheta, model=model, sps=sps)
+        phy_samples = get_Samples_Prospector(output, model=model, sps=sps)
+
+        # Save fitting results
+        output_name = f'{self._temp_path}/temp_bin{index}.dill'
+
+        fit_output = dict(
+            bin_index = index,
+            model_seds = model_seds,
+            fit_params = dict(zip(model.free_params, btheta)),
+            phy_params = phy_params,
+            output_name = output_name, 
+        )
+
+        pd = dict(obs=obs, sps=sps, model=model, output=output, 
+                  phy_samples=phy_samples, fit_output=fit_output)
+        with open(output_name, 'wb') as f:
+            pickle.dump(pd, f)
+
+        if plot:
+            plot_fit_output(self._bin_info, fit_output, fig=fig, axs=axs, 
+                            norm_kwargs=norm_kwargs, units_x=units_x)
+        
+        return pd
+
     def gen_averaged_map(self, indices:list, plot=False, ax=None, 
                          norm_kwargs=None):
         '''
@@ -265,109 +388,39 @@ class SED_cube(object):
         idx = self._band.index(band)
         return idx
 
-    def fit_allsed_prospector(self, bands, redshift, lumdist=None, unc_add=0.1, 
-                              model_params=None, noise_model=None, sps=None, 
-                              optimize=False, emcee=False, dynesty=True, 
-                              fitting_kwargs=None, ncpu=1, print_progress=True,
-                              verbose=True, debug=False): 
+    def load_seds(self, filename):
         '''
-        Fit all the binned SEDs.
+        Load the reduced binned SEDs.
         '''
-        nbins = self._bin_info['nbins']
-
-        func = lambda x : self.fit_sed_prospector(
-            x, bands=bands, redshift=redshift, lumdist=lumdist, unc_add=unc_add, 
-            model_params=model_params, noise_model=noise_model, sps=sps, 
-            optimize=optimize, emcee=emcee, dynesty=dynesty, 
-            fitting_kwargs=fitting_kwargs, print_progress=False, 
-            plot=False, verbose=verbose, debug=debug)
-
-        if ncpu > 1:
-            from multiprocess import Pool
-            pool = Pool(ncpu)
-            if print_progress:
-                results = list(tqdm(pool.imap(func, range(nbins)), total=nbins))
-            else:
-                results = pool.map(func, range(nbins))
-        else:
-            if print_progress:
-                results = [func(idx) for idx in tqdm(range(nbins))]
-            else:
-                results = [func(idx) for idx in range(nbins)]
-
-        self._fit_outputs = dict(zip([f'bin{idx}' for idx in range(nbins)], results))
-
-    def fit_sed_prospector(self, index, bands, redshift, lumdist=None, unc_add=0.1, 
-                           model_params=None, noise_model=None, sps=None,
-                           optimize=False, emcee=False, dynesty=True, 
-                           fitting_kwargs=None, print_progress=True, plot=False, 
-                           fig=None, axs=None, norm_kwargs=None, 
-                           units_x='micron', verbose=False, debug=False): 
-        '''
-        Fit one SED with Prospector.
-
-        Parameters
-        ----------
-        index : int
-            The bin index.
-        bands : list of str
-            The bands of the SED.
-        redshift : float
-            The redshift of the source.
-        lumdist (optional) : float
-            The luminosity distance of the source, units: Mpc. If not provided, 
-            Prospector will use the redshift to calculate the lumdist.
-        unc_add : float (default: 0.1)
-            The 
-        '''
-        assert getattr(self, '_seds', None) is not None, 'Please run collect_sed first!'
-
-        if verbose:
-            print(f'Fit bin {index}!')
-
-        if debug:
-            return index
+        hdul = fits.open(filename)
+        self._seds = {'flux': hdul['sed_flux'].data.T, 
+                      'error': hdul['sed_error'].data.T}
         
-        maggies = self._seds['flux'][:, index] / 3631  # converted to maggies
-        maggies_unc = self._seds['error'][:, index] / 3631
-        maggies_unc = np.sqrt(maggies_unc**2 + (unc_add * maggies)**2)
-        output, obs, model, sps = fit_SED_Prospector(
-            bands, maggies=maggies, maggies_unc=maggies_unc, redshift=redshift, 
-            lumdist=lumdist, model_params=model_params, noise_model=noise_model, 
-            sps=sps, optimize=optimize, emcee=emcee, dynesty=dynesty, 
-            fitting_kwargs=fitting_kwargs, print_progress=print_progress)
+        bandinfo = hdul['bandinfo']
+        self._band = hdul['bandinfo'].data['BAND']
+        self._wavelength = hdul['bandinfo'].data['WAVELENGTH'] * units.Unit(bandinfo.header['TUNIT2'])
+        self._nband = len(self._band)
 
-        btheta = get_BestFit_Prospector(output, model=model)
-        spec, phot, _ = model.predict(btheta, obs=obs, sps=sps)
+        bin_info = {}
+        bin_info['target_sn'] = bandinfo.header['TARGSN']
+        bin_info['nbins'] = bandinfo.header['NBINS']
 
-        swave = sps.wavelengths * (1 + redshift)
-        pwave = np.array([f.wave_effective for f in obs["filters"]])
-
-        phy_params = get_Params_Prospector(btheta, model=model, sps=sps)
-        phy_samples = get_Samples_Prospector(output, model=model, sps=sps)
-
-        # Save fitting results
-        output_name = f'{self._temp_path}/temp_bin{index}.dill'
-        pd = dict(obs=obs, sps=sps, model=model, output=output, phy_samples=phy_samples)
-        with open(output_name, 'wb') as f:
-            pickle.dump(pd, f)
-
-        fit_output = dict(
-            bin_index = index,
-            pwave = pwave,
-            swave = swave,
-            spec_best = spec,
-            phot_best = phot,
-            fit_params = dict(zip(model.free_params, btheta)),
-            phy_params = phy_params,
-            output_name = output_name, 
-        )
-
-        if plot:
-            plot_fit_output(self._bin_info, fit_output, fig=fig, axs=axs, 
-                            norm_kwargs=norm_kwargs, units_x=units_x)
+        for k in ['image', 'error', 'mask', 'segm']:
+            data = hdul[k].data
+            if k == 'mask':
+                data = data.astype(bool)
+            bin_info[k] = data
         
-        return fit_output
+        for k in ['bin_num', 'x_index', 'y_index']:
+            bin_info[k] = hdul['pixelinfo'].data[k]
+        
+        for k in ['sn', 'nPixels', 'scale', 'x_bar', 'y_bar']:
+            bin_info[k] = hdul['bininfo'].data[k]
+
+        from .utils_sed import rand_cmap
+        bin_info['cmap'] = rand_cmap(bin_info['nbins'], type='soft', first_color_white=True, verbose=False)
+        self._bin_info = bin_info
+        return bin_info
 
     def plot_sed(self, index, fig=None, axs=None, units_w='micron', 
                  units_f='Jy', label_kwargs={}):
@@ -441,3 +494,48 @@ class SED_cube(object):
                 axs[loop, 1].set_xticklabels([])
         axs[0, 1].set_ylim(np.min(ylimList), np.max(ylimList))
 
+    def save_seds(self, filename, overwrite=False):
+        '''
+        Save the binned SEDs.
+        '''
+        assert getattr(self, '_bin_info', None) is not None, 'Please get the bin map!'
+        assert getattr(self, '_seds', None) is not None, 'Please collect the binned SEDs!'
+
+        if getattr(self, '_header', None) is None:
+            header = fits.Header()
+        else:
+            header = self._header.copy()
+        header['BINSED'] = (True, 'The binned SED data are included if True.')
+        hduList = [fits.PrimaryHDU(header=header)]
+
+        header = fits.Header()
+        header['rows'] = 'bins'
+        header['columns'] = 'bands'
+        for k in ['flux', 'error']:
+            hduList.append(fits.ImageHDU(data=self._seds[k].T, header=header, name=f'sed_{k}'))
+        
+        cols = [fits.Column(name='BAND', format='20A', array=self._band),
+                fits.Column(name='WAVELENGTH', format='1E', array=self._wavelength.value, 
+                            unit=self._wavelength.unit.to_string())]
+        hduList.append(fits.BinTableHDU.from_columns(cols, name='BANDINFO'))
+        hduList[-1].header['TARGSN'] = self._bin_info['target_sn']
+        hduList[-1].header['NBINS'] = self._bin_info['nbins']
+
+        cols = []
+        for k in ['bin_num', 'x_index', 'y_index']:
+            cols.append(fits.Column(name=k, format='1E', array=self._bin_info[k]))
+        hduList.append(fits.BinTableHDU.from_columns(cols, name='PIXELINFO'))
+
+        for k in ['image', 'error', 'mask', 'segm']:
+            data = self._bin_info[k]
+            if k == 'mask':
+                data = data.astype(int)
+            hduList.append(fits.ImageHDU(data=data, name=k))
+        
+        cols = []
+        for k in ['sn', 'nPixels', 'scale', 'x_bar', 'y_bar']:
+            cols.append(fits.Column(name=k, format='1E', array=self._bin_info[k]))
+        hduList.append(fits.BinTableHDU.from_columns(cols, name='BININFO'))
+
+        hdul = fits.HDUList(hduList)
+        hdul.writeto(filename, overwrite=overwrite)

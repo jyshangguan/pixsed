@@ -114,7 +114,7 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
 
     bin_info = {
         'image': image,
-        'noise': noise,
+        'error': error,
         'mask': mask,
         'segm': segm,
         'cmap': cmap,
@@ -303,6 +303,29 @@ def get_BestFit_Prospector(output, model=None):
         raise NotImplementedError('To be implemented for optimization!')
 
     return theta
+
+
+def get_Models_Prospector(theta, model, obs, sps):
+    '''
+    Get the model components of the Prospector.
+    '''
+    swave = sps.wavelengths * (1 + obs['redshift'])
+    pwave = np.array([f.wave_effective for f in obs["filters"]])
+
+    model_seds = dict(spec_wave=swave, phot_wave=pwave)
+    model_seds['spec_total'], model_seds['phot_total'], _ = model.predict(theta, obs=obs, sps=sps)
+
+    if model.params.get('add_agn_dust', False):
+        theta_noagn = deepcopy(theta)
+        theta_noagn[model.free_params.index('fagn')] = 0
+        spec_var, phot_var, _ = model.predict(theta_noagn, obs=obs, sps=sps)
+        model_seds['spec_agn'] = model_seds['spec_total'] - spec_var
+        model_seds['phot_agn'] = model_seds['phot_total'] - phot_var
+    else:
+        model_seds['spec_agn'] = None
+        model_seds['phot_agn'] = None
+
+    return model_seds
 
 
 def get_Galactic_Av(ra, dec, band='CTIO V', ref='A_SandF'):
@@ -522,7 +545,7 @@ def plot_bin_segm(bin_info, highlight_index=None, fig=None, ax=None,
     
     if highlight_index is not None:
         ax.plot(x_bar[highlight_index], y_bar[highlight_index], marker='x', 
-                ms=8, color='r')
+                ms=8, color='r', zorder=5)
         ax.text(0.05, 0.95, f'Bin {highlight_index}', fontsize=16, color='r',
                 transform=ax.transAxes, ha='left', va='top')
 
@@ -589,7 +612,7 @@ def plot_phys_image(image, bin_info, fig=None, ax=None, norm_kwargs=None,
     return fig, ax, cbar
 
 
-def plot_Prospector_SED(fit_output, obs, fig=None, axs=None, units_x='micron'):
+def plot_Prospector_SED(model_seds, obs, fig=None, axs=None, units_x='micron'):
     '''
     Plot the SED of the Prospector fitting results.
     '''
@@ -604,16 +627,19 @@ def plot_Prospector_SED(fit_output, obs, fig=None, axs=None, units_x='micron'):
     y_d = obs['maggies']
     y_d_err = obs['maggies_unc']
 
-    phot = fit_output['phot_best']
-    spec = fit_output['spec_best']
-    x_p = (fit_output['pwave'] * units.angstrom).to(units_x).value
-    x_s = (fit_output['swave'] * units.angstrom).to(units_x).value
+    phot = model_seds['phot_total']
+    spec = model_seds['spec_total']
+    x_p = (model_seds['phot_wave'] * units.angstrom).to(units_x).value
+    x_s = (model_seds['spec_wave'] * units.angstrom).to(units_x).value
 
     ax.plot(x_p, y_d, marker='o', ls='none', color='k', label='Data')
     ax.errorbar(x_p, y_d, yerr=y_d_err, marker='o', ls='none', color='k')
     ax.plot(x_p, phot, linestyle='', marker='s', markersize=10, 
             mec='orange', mew=2, mfc='none', alpha=0.5, label='Model')
     ax.plot(x_s, spec, color='C3', label='Best fit')
+
+    if model_seds.get('spec_agn', None) is not None:
+        ax.plot(x_s, model_seds['spec_agn'], color='gray', ls='--')
 
     ax.set_xlim(x_p.min() * 0.1, x_p.max() * 5)
     ax.set_ylim(y_d.min() * 0.1, y_d.max() * 5)
