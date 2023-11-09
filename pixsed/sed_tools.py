@@ -233,7 +233,7 @@ class SED_cube(object):
             else:
                 results = [func(idx) for idx in range(nbins)]
 
-        self._fit_outputs = dict(zip([f'bin{idx}' for idx in range(nbins)], results))
+        self._fit_output_names = results
 
     def fit_sed_prospector(self, index, bands, redshift, lumdist=None, unc_add=0.1, 
                            model_params=None, noise_model=None, sps=None,
@@ -276,10 +276,6 @@ class SED_cube(object):
             fitting_kwargs=fitting_kwargs, print_progress=print_progress)
 
         btheta = get_BestFit_Prospector(output, model=model)
-        #spec, phot, _ = model.predict(btheta, obs=obs, sps=sps)
-
-        #swave = sps.wavelengths * (1 + redshift)
-        #pwave = np.array([f.wave_effective for f in obs["filters"]])
         model_seds = get_Models_Prospector(btheta, model=model, obs=obs, sps=sps)
 
         phy_params = get_Params_Prospector(btheta, model=model, sps=sps)
@@ -305,7 +301,7 @@ class SED_cube(object):
             plot_fit_output(self._bin_info, fit_output, fig=fig, axs=axs, 
                             norm_kwargs=norm_kwargs, units_x=units_x)
         
-        return pd
+        return output_name
 
     def gen_averaged_map(self, indices:list, plot=False, ax=None, 
                          norm_kwargs=None):
