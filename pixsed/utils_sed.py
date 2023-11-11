@@ -253,32 +253,6 @@ def gen_image_phys(parname, bin_info, bin_phys):
     return image
 
 
-def gen_image_density(parname, bin_info, bin_phys, pixel_to_area):
-    '''
-    Generate the density map with the physical parameters from the SED fitting.
-    '''
-    from collections import Counter
-
-    bin_num = bin_info['bin_num']
-    bin_area = Counter(bin_info['bin_num'])
-    x_index = bin_info['x_index']
-    y_index = bin_info['y_index']
-    phypar = bin_phys[parname]
-
-    image = np.full_like(bin_info['image'], np.nan)
-    area = np.zeros_like(bin_info['image'])
-    for b, x, y in zip(bin_num, x_index, y_index):
-        image[y, x] = phypar[b]
-        area[y, x] = bin_area[b]
-    
-    if parname in ['logmstar', 'logmdust']:
-        density = image - np.log10(area * pixel_to_area)
-    else:
-        density = image / (area * pixel_to_area)
-
-    return density
-
-
 def get_BestFit_Prospector(output, model=None):
     '''
     Get the best-fit parameters of the Prospector results.
@@ -463,6 +437,18 @@ def get_Samples_Prospector(output, model, sps, sfr_dt=0.1, show_progress=False):
     return samples, parnames
 
 
+def order_fit_output(filenames):
+    '''
+    Rearrange the order of the file name list.
+    '''
+    idxList = []
+    for f in filenames:
+        fit_output = read_fit_output(f)
+        idxList.append(fit_output['fit_output']['bin_index'])
+    fl_order = list(np.array(filenames)[np.argsort(idxList)])
+    return fl_order
+
+
 def plot_bin_image(bin_info, highlight_index=None, fig=None, ax=None, 
                    norm_kwargs=None, imshow_kwargs=None):
     '''
@@ -509,6 +495,7 @@ def plot_bin_image(bin_info, highlight_index=None, fig=None, ax=None,
 
     ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
     ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
+    ax.minorticks_on()
     return fig, ax
 
 
@@ -530,6 +517,7 @@ def plot_bin_segm(bin_info, highlight_index=None, fig=None, ax=None,
     plot_mask_contours(mask, ax=ax, color='k', verbose=False)
     ax.set_xlabel(r'$X$ (pixel)', fontsize=24)
     ax.set_ylabel(r'$Y$ (pixel)', fontsize=24)
+    ax.minorticks_on()
 
     if label_kwargs is not None:
         if 'fontsize' not in label_kwargs:
@@ -557,9 +545,9 @@ def plot_fit_output(bin_info, fit_output, fig=None, axs=None, norm_kwargs=None,
     '''
     Plot the fit output.
     '''
-    with open(fit_output['output_name'], 'rb') as f:
-        pd = pickle.load(f)
-    obs = pd['obs']
+    obs = fit_output['obs']
+    model_seds = fit_output['fit_output']['model_seds']
+    index = fit_output['fit_output']['bin_index']
 
     if axs is None:
         fig = plt.figure(figsize=(14, 7))
@@ -568,9 +556,9 @@ def plot_fit_output(bin_info, fit_output, fig=None, axs=None, norm_kwargs=None,
         ax2 = fig.add_axes([0.58, 0.05, 0.35, 0.30])
         ax2.sharex(ax1)
 
-    plot_bin_image(bin_info, highlight_index=fit_output['bin_index'], fig=fig, 
-                   ax=ax0, norm_kwargs=norm_kwargs)
-    plot_Prospector_SED(fit_output, obs, fig=fig, axs=[ax1, ax2], 
+    plot_bin_image(bin_info, highlight_index=index, fig=fig, ax=ax0, 
+                   norm_kwargs=norm_kwargs)
+    plot_Prospector_SED(model_seds, obs, fig=fig, axs=[ax1, ax2], 
                         units_x=units_x)
 
     return fig, [ax0, ax1, ax2]
@@ -588,7 +576,7 @@ def plot_phys_image(image, bin_info, fig=None, ax=None, norm_kwargs=None,
         fig, ax = plt.subplots(figsize=(7, 7))
     
     if norm_kwargs is None:
-        norm_kwargs = dict(percent=95, stretch='linear')
+        norm_kwargs = dict(percent=99, stretch='linear')
     norm = simple_norm(image, **norm_kwargs)
 
     if imshow_kwargs is None:
@@ -747,6 +735,15 @@ def rand_cmap(nlabels, type='bright', first_color_white=True, last_color_white=F
                                    boundaries=bounds, format='%1i', orientation=u'horizontal')
 
     return random_colormap
+
+
+def read_fit_output(filename):
+    '''
+    Read the fit output.
+    '''
+    with open(filename, 'rb') as f:
+        fit_output = pickle.load(f)
+    return fit_output
 
 
 label_params = {'logmstar': r'$\log\,(M_*/M_\odot)$', 
