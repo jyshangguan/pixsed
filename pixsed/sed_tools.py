@@ -1,3 +1,4 @@
+import glob
 import numpy as np
 import matplotlib as mpl
 from tqdm import tqdm
@@ -21,8 +22,8 @@ from .utils_sed import (plot_bin_image, plot_bin_segm, plot_Prospector_SED, plot
 from .utils_sed import (binmap_voronoi, get_Galactic_Alambda, 
                         fit_SED_Prospector, get_Params_Prospector, 
                         get_Samples_Prospector, get_BestFit_Prospector, 
-                        get_Models_Prospector, gen_image_phys, 
-                        gen_image_density) 
+                        get_Models_Prospector, gen_image_phys) 
+from .utils_sed import read_fit_output, order_fit_output
 #from prospect.io import write_results as writer
 
 
@@ -325,45 +326,46 @@ class SED_cube(object):
 
         return img_ave, err_ave
 
-    def gen_bin_phys(self):
+    def gen_bin_phys(self, output_names=None, pixel_to_kpc=None):
         '''
         Generate the list of physical parameter for the bins.
         '''
-        nbins = self._bin_info['nbins']
-        best_phys = self._fit_outputs['bin0']['phy_params']
-        parnames = list(best_phys.keys())
-        bin_phys = {}
+        if output_names is None:
+            assert getattr(self, '_fit_output_names', None) is not None, 'Cannot find the fitting outputs!'
+            assert self._bin_info['nbins'] == len(self._fit_output_names), 'The output number and bin number are not consistent!'
+        else:
+            assert self._bin_info['nbins'] == len(output_names), 'The output number and bin number are not consistent!'
+            self._fit_output_names = order_fit_output(output_names)
 
-        for loop in range(nbins):
+        bin_phys = {}
+        for loop, fn in enumerate(self._fit_output_names):
+            fit_output = read_fit_output(fn)
+
+            best_phys = fit_output['fit_output']['phy_params']
+
             if loop == 0:
+                parnames = list(best_phys.keys())
                 for pn in parnames:
                     bin_phys[pn] = [best_phys[pn]]
             else:
-                best_phys = self._fit_outputs[f'bin{loop}']['phy_params']
                 for pn in parnames:
                     bin_phys[pn].append(best_phys[pn])
 
-        self._bin_phys = bin_phys
+        if pixel_to_kpc is not None:
+            area_kpc = self._bin_info['nPixels'] * pixel_to_kpc**2  # kpc^2
+            bin_phys['log_sigma_star'] = bin_phys['logmstar'] - np.log10(area_kpc)
+            bin_phys['log_sigma_dust'] = bin_phys['logmdust'] - np.log10(area_kpc)
+            bin_phys['log_sigma_sfr'] = np.log10(bin_phys['sfr'] / area_kpc)
 
-    def gen_image_density(self, pixel_to_area=None):
-        '''
-        Generate the density map with the physical parameters from the SED 
-        fitting.
-        '''
-        if pixel_to_area is None:
-            raise NotImplementedError('To be done...')
-        
-        self._image_density = {}
-        for pn in ['logmstar', 'sfr', 'logmdust']:
-            self._image_density[pn] = gen_image_density(
-                pn, self._bin_info, self._bin_phys, pixel_to_area)
+        self._bin_phys = bin_phys
 
     def gen_image_phys(self):
         '''
         Generate the maps with the physical parameters from the SED fitting.
         '''
-        self._image_phys = {}
+        assert getattr(self, '_bin_phys', None) is not None, 'Please generate the _bin_phys!'
 
+        self._image_phys = {}
         for pn in self._bin_phys.keys():
             self._image_phys[pn] = gen_image_phys(pn, self._bin_info, self._bin_phys)
 
@@ -417,6 +419,45 @@ class SED_cube(object):
         bin_info['cmap'] = rand_cmap(bin_info['nbins'], type='soft', first_color_white=True, verbose=False)
         self._bin_info = bin_info
         return bin_info
+
+    @property
+    def logmdust_total(self):
+        '''
+        The total dust mass from the SED fitting in Msun (log scale).
+        '''
+        assert getattr(self, '_bin_phys', None) is not None, 'Please generate the _bin_phys!'
+        mdust = 10**np.array(self._bin_phys['logmdust'])
+        logmdust_total = np.log10(np.sum(mdust))
+        return logmdust_total
+
+    @property
+    def logmstar_total(self):
+        '''
+        The total stellar mass from the SED fitting in Msun (log scale).
+        '''
+        assert getattr(self, '_bin_phys', None) is not None, 'Please generate the _bin_phys!'
+        mstar = 10**np.array(self._bin_phys['logmstar'])
+        logmstar_total = np.log10(np.sum(mstar))
+        return logmstar_total
+
+    @property
+    def logsfr_total(self):
+        '''
+        The total star formation rate from the SED fitting in Msun/yr (log scale).
+        '''
+        assert getattr(self, '_bin_phys', None) is not None, 'Please generate the _bin_phys!'
+        logsfr_total = np.log10(np.sum(self._bin_phys['sfr']))
+        return logsfr_total
+
+    def plot_fit_output(self, index, fig=None, axs=None, norm_kwargs=None, 
+                        units_x='micron'):
+        '''
+        Plot the fitting output.
+        '''
+        assert getattr(self, '_fit_output_names', None) is not None, 'Cannot find the fitting outputs!'
+        fit_output = read_fit_output(self._fit_output_names[index])
+        plot_fit_output(self._bin_info, fit_output, fig=fig, axs=axs, 
+                        norm_kwargs=norm_kwargs, units_x=units_x)
 
     def plot_sed(self, index, fig=None, axs=None, units_w='micron', 
                  units_f='Jy', label_kwargs={}):
