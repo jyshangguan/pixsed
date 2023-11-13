@@ -882,7 +882,7 @@ def gen_aperture_ellipse(image, coord_pix, threshold_segm, psf_fwhm, threshold_s
         macro_rms = np.std(mea_box)
 
         intens = np.array(intens)
-        intens_rms = np.array(intens_rms) / np.sqrt(area) + macro_rms
+        intens_rms = np.sqrt((np.array(intens_rms) / np.sqrt(area))**2 + macro_rms**2)
         snr = intens / intens_rms
         snr_sub = (snr - threshold_snr)
 
