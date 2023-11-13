@@ -2430,7 +2430,7 @@ class Image(object):
                                 plot=False, axs=None, **segm_kwargs):
         aper = gen_aperture_ellipse(self._data_clean, self._coord_pix, threshold_segm=threshold_segm,
                                     threshold_snr=threshold_snr, psf_fwhm=self._psf_fwhm_pix,
-                                    mask=None, grid_mask=self._mask_contaminant,
+                                    mask=self._mask_contaminant, grid_mask=self._mask_contaminant,
                                     grid_num=grid_num, naper=naper, fracs=fracs,
                                     plot=plot, axs=axs, **segm_kwargs)
         self._phot_aper = aper
@@ -3638,7 +3638,7 @@ class Atlas(object):
                 print(f'[remove_background] image {loop}: {img}')
 
             box_size = int(img._shape[0] * box_fraction)
-            img.gen_model_background(box_size=box_size, filter_size=filter_size)
+            img.gen_model_background(box_size=box_size, filter_size=filter_size,)
             img.background_subtract()
 
     def reset_coordinate(self, ra, dec):
@@ -3698,14 +3698,17 @@ class Atlas(object):
             hduList.append(fits.BinTableHDU.from_columns(cols, name='info'))
 
         header = self._wcs_match.to_header()
-        for loop, (b, w) in enumerate(zip(self.band_list, self.wavelength)):
-            header[f'BAND_{loop}'] = b
-            header[f'WAVE_{loop}'] = f'{w}'
+
+        if self.wavelength and self.band_list is not None:
+            for loop, (b, w) in enumerate(zip(self.band_list, self.wavelength)):
+                header[f'BAND_{loop}'] = b
+                header[f'WAVE_{loop}'] = f'{w}'
         
         image = np.array(self._data_match)
-        error = np.array(np.sqrt(self._vars_match))
         hduList.append(fits.ImageHDU(data=image, header=header, name='image'))
-        hduList.append(fits.ImageHDU(data=error, header=header, name='error'))
+        if self._vars_match is not None:
+            error = np.array(np.sqrt(self._vars_match))
+            hduList.append(fits.ImageHDU(data=error, header=header, name='error'))
 
         header = self._wcs_match.to_header()
         hduList.append(fits.ImageHDU(self._mask_galaxy_match.astype(int), header=header, name=f'mask_galaxy'))
