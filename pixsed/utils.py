@@ -1042,6 +1042,9 @@ def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8,
         slice_y = slice(ymin, ymax)
         img = image[slice_y, slice_x]
 
+        if mask is not None:
+            mask = mask[slice_y, slice_x]
+    
     smap, cdata = get_image_segmentation(img, threshold=threshold,
                                          npixels=npixels, mask=mask,
                                          connectivity=connectivity,
@@ -1175,14 +1178,17 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
         imGen = atlas._image_list
 
     for img in imGen:
+        data_clean = img.fetch_temp_image('data_clean')
+        assert data_clean is not None, f'[gen_images_matched]: Generate the cleaned image of {img} first!'
+
         if psf_fwhm > img._psf_fwhm:
             fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
             sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
-            data_conv = gaussian_filter(img._data_clean, sigma=sigma)
+            data_conv = gaussian_filter(data_clean, sigma=sigma)
         else:
             if verbose:
                 print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
-            data_conv = img._data_clean
+            data_conv = data_clean
 
         data_rebin, _ = reproject_adaptive((data_conv, img._wcs), output_wcs,
                                            shape_out=shape_out, kernel='gaussian',
@@ -1248,16 +1254,17 @@ def gen_variance_matched(atlas, psf_fwhm: float, image_size: float,
         imGen = atlas._image_list
 
     for img in imGen:
-        assert getattr(img, '_data_variance', None) is not None, 'Please generate the variance map!'
+        data_variance = img.fetch_temp_image('data_variance')
+        assert data_variance is not None, '[gen_variance_matched]: Please generate the variance map!'
 
         if psf_fwhm > img._psf_fwhm:
             fwhm = np.sqrt(psf_fwhm ** 2 - img._psf_fwhm ** 2)
             sigma = fwhm / img._pxs * gaussian_fwhm_to_sigma
-            data_conv = gaussian_filter(img._data_variance, sigma=sigma)
+            data_conv = gaussian_filter(data_variance, sigma=sigma)
         else:
             if verbose:
-                print(f'[gen_images_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
-            data_conv = img._data_variance
+                print(f'[gen_variance_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
+            data_conv = data_variance
 
         data_rebin, _ = reproject_adaptive((data_conv, img._wcs), output_wcs,
                                            shape_out=shape_out, kernel='gaussian',

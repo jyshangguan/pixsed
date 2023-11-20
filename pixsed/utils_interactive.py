@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from astropy.io import fits
 from shapely.geometry import shape
 from astropy.visualization import simple_norm
 from pixsed.utils import get_mask_polygons, plot_mask_contours
@@ -310,13 +311,27 @@ class MaskBuilder_draw:
             self.print_mode()
             self.print_action('ESC')
 
-    def on_close(self, event):
+    def on_close(self, event, filename=None, wcs=None):
         '''
         Action on close.
         '''
         self._ipy.run_line_magic('matplotlib', 'inline')
         self.plot_mask_manual()
         plt.show()
+
+        if filename is not None:
+            if wcs is None:
+                header = wcs.to_header()
+            else:
+                header = None
+            hdu = fits.ImageHDU(data=self._mask_manual.astype(int), header=header, name='mask_manual')
+
+            hdul = fits.open(filename, mode='update')
+            if 'mask_manual' in hdul:
+                hdul.pop('mask_manual')
+        
+            hdul.append(hdu)
+            hdul.close()
 
     def plot_mask_manual(self):
         '''
