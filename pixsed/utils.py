@@ -1194,8 +1194,8 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
                                            shape_out=shape_out, kernel='gaussian',
                                            conserve_flux=True,
                                            boundary_mode='ignore')
-
         images.append(data_rebin)
+        del data_clean, data_conv
     return images, output_wcs
 
 
@@ -1272,6 +1272,7 @@ def gen_variance_matched(atlas, psf_fwhm: float, image_size: float,
                                            boundary_mode='ignore')
 
         varmaps.append(data_rebin)
+        del data_variance, data_conv
     return varmaps, output_wcs
 
 
