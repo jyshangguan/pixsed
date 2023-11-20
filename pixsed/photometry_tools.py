@@ -2355,6 +2355,27 @@ class Image(object):
         self.dump_temp_segm(smap, 'segment_map')
         self.dump_temp_image(cdata, 'data_convolved')
 
+    def gen_data_variance(self, filename=None, extension=0, f_flux=0, box_size=None, filter_size=5):
+        '''
+        Generate the data variance.
+        '''
+        if filename is not None:
+            hdul = fits.open(filename)
+            data_variance = hdul[extension].data
+        else:
+            if box_size is None:
+                box_size = self._shape[0] // 50
+
+            mask_galaxy = self.fetch_temp_mask('mask_galaxy')
+            assert mask_galaxy is not None, 'Cannot find the mask_galaxy!'
+            
+            data_subbkg = self.fetch_temp_image('data_subbkg')
+            assert data_subbkg is not None, 'Cannot find the data_subbkg!'
+
+            data_variance = self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+            data_variance[mask_galaxy] = (data_variance + np.square(f_flux * data_subbkg))[mask_galaxy]
+        self.dump_temp_image(data_variance, 'data_variance')
+
     def gen_variance_background(self, box_size=None, filter_size=5, nsigma=2, 
                                 kernel_fwhm=5, f_sample=1):
         '''
@@ -3171,6 +3192,19 @@ class Image(object):
         filename = os.path.join(self._temp_dir, self._temp_name)
         return filename
 
+    def __getattr__(self, name):
+        '''
+        Get the attribute of the Image object.
+        '''
+        if name[:5] == '_data':
+            return self.fetch_temp_image(name[1:])
+        elif name[:6] == '_model':
+            return self.fetch_temp_image(name[1:])
+        elif name[:5] == '_mask':
+            return self.fetch_temp_mask(name[1:])
+        elif name[:5] == '_segm':
+            return self.fetch_temp_segm(name[1:])
+
     def __repr__(self):
         '''
         Print property of the image.
@@ -3266,62 +3300,6 @@ class Atlas(object):
                 print(f'[adapt_masks] image {loop}: {img}')
 
             img.adapt_to(img_ref, plot=plot, verbose=verbose)
-
-    def clean_temp_path(self):
-        '''
-        Find existing files or folders in self._temp_path with prefix 'pixsed_atlas_' and remove them.
-        '''
-        from shutil import rmtree
-
-        for file in os.listdir(self._temp_path):
-            if file.startswith('pixsed_atlas_'):
-                p = os.path.join(self._temp_path, file)
-                if os.path.isdir(p):
-                    rmtree(p)
-                else:
-                    os.remove(p)
-
-    def create_temp_dir(self):
-        '''
-        Create the temporary directory
-        '''
-        if not os.path.exists(self._temp_path):
-            os.makedirs(self._temp_path)
-        
-        tempfile.tempdir = self._temp_path
-        self._temp_dir = tempfile.mkdtemp(prefix='pixsed_atlas_')
-        self._temp_name = f'pixsed_atlas_{uuid.uuid4().hex}'
-
-    def close_temp_dir(self):
-        '''
-        Close the temporary directory
-        '''
-        from shutil import rmtree
-        rmtree(self._temp_dir)
-
-    def gen_photometry_aperture(self, filename):
-        hdul = fits.open(filename)
-        header = hdul[0].header
-        w0 = WCS(header)
-        w = self._wcs_match
-        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
-        pxs_matched = self._pxs_match
-        ra = header['RA']
-        dec = header["DEC"]
-        pa0 = header["APER_PA"]
-        ep0 = (
-        header['XCOORD'] + header["APER_SMA"] * math.cos(pa0), header['yCOORD'] + header["APER_SMA"] * math.sin(pa0))
-        ep_world = w0.pixel_to_world(ep0[0], ep0[1])
-        ep = w.world_to_pixel(ep_world)
-        sky_coord = SkyCoord(ra, dec, unit='deg')
-        x, y = w.world_to_pixel(sky_coord)
-        sma = header["APER_SMA"] * pxs / pxs_matched
-        smb = header["APER_SMB"] * pxs / pxs_matched
-        pa = math.atan((ep[1] - y) / (ep[0] - x))
-
-        aper = EllipticalAperture((x, y), sma, smb, pa)
-
-        return aper
 
     def aperture_photometry(self, aperture, mask=None, rannu_in=1.25,
                             rannu_out=1.6,
@@ -3494,111 +3472,159 @@ class Atlas(object):
                 self.plot_single_image(image_index, fig=fig, axs=axs, verbose=verbose,
                                        norm_kwargs=norm_kwargs, interactive=False)
 
-    def match_mask_galaxy(self, mask, input_wcs, simplify=True, connectivity=8, 
-                          plot=False, ncols=1, verbose=False):
+    def clean_temp_path(self):
         '''
-        Convert the target mask to the matched images. 
-
-        Parameters
-        ----------
-        mask : 2D array
-            The input mask.
-        input_wcs : WCS
-            The wcs of the input mask.
-        simplify : bool (default: True)
-            Simplify the mask with the convex hull if True.
-        connectivity : {4, 8} (default: 8)
-            The type of pixel connectivity used in determining how pixels are
-            grouped into a detected source. The options are 4 or 8 (default).
-            4-connected pixels touch along their edges. 8-connected pixels touch
-            along their edges or corners.
-        plot : bool (default: False)
-            Plot the matched images and masks if True.
-        ncols : int (default: 1)
-            Number of columns to plot.
-        verbose : bool (default: False)
-            Print additional info if True.
+        Find existing files or folders in self._temp_path with prefix 'pixsed_atlas_' and remove them.
         '''
-        assert getattr(self, '_wcs_match', None) is not None, 'Please run match_image() first!'
-        shape_out = self._wcs_match.pixel_shape
+        from shutil import rmtree
 
-        if simplify:
-            mask = simplify_mask(mask, connectivity=connectivity)
+        for file in os.listdir(self._temp_path):
+            if file.startswith('pixsed_atlas_'):
+                p = os.path.join(self._temp_path, file)
+                if os.path.isdir(p):
+                    rmtree(p)
+                else:
+                    os.remove(p)
 
-        mask_out = adapt_mask(mask, input_wcs=input_wcs, 
-                              output_wcs=self._wcs_match, shape_out=shape_out)
+    def close_temp_dir(self):
+        '''
+        Close the temporary directory
+        '''
+        from shutil import rmtree
+        rmtree(self._temp_dir)
+
+    def create_temp_dir(self):
+        '''
+        Create the temporary directory
+        '''
+        if not os.path.exists(self._temp_path):
+            os.makedirs(self._temp_path)
         
-        # Include the coverage mask
-        for img in self:
-            mask_coverage_org = getattr(img, '_mask_coverage', None)
-            if mask_coverage_org is not None:
-                mask_coverage = adapt_mask(
-                    mask_coverage_org, input_wcs=img._wcs, 
-                    output_wcs=self._wcs_match, shape_out=shape_out)
-                mask_out &= ~mask_coverage
-            
-        # Exclude NaN
-        for data in self._data_match:
-            mask_out &= ~np.isnan(data)
+        tempfile.tempdir = self._temp_path
+        self._temp_dir = tempfile.mkdtemp(prefix='pixsed_atlas_')
+        self._temp_name = f'pixsed_atlas_{uuid.uuid4().hex}'
 
-        self._mask_galaxy_match = mask_out
-
-        if plot:
-            nrows = int(np.ceil(self._n_image / ncols))
-
-            fig, axs = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
-            axs = axs.flatten()
-            fig.subplots_adjust(wspace=0.05, hspace=0.05)
-
-            self.plot_atlas(
-                ncols=ncols, data_type='data_match', show_info='size', 
-                show_units='arcmin', interactive=False, fig=fig, axs=axs)
-            
-            for loop in range(self._n_image):
-                plot_mask_contours(mask_out, ax=axs[loop], verbose=verbose, color='cyan')
-
-    def match_image(self, psf_fwhm, image_size, pixel_scale=None, 
-                    skip_variance=False, plot=False, ncols=3, 
-                    progress_bar=False, verbose=False):
+    def dump_temp_image(self, data, name, wcs=None):
         '''
-        Generate the matched images.
+        Dump the data to a temporary file.
 
         Parameters
         ----------
-        psf_fwhm : float
-            The PSF FWHM, units: arcsec
-        image_size : float
-            The size of the output image, units: arcsec
-        pixel_scale (optional) : float
-            The output pixel scale, units: arcsec. If not provided, half of
-            the psf_fwhm will be used to ensure the Nyquist sampling.
-        skip_variance : bool (default: False)
-            Skip matching the variance map if True.
-        progress_bar : bool (default: False)
-            The progress of the processed images.
-        verbose : bool (default: False)
-            Print details if True.
+        data : numpy.ndarray
+            The data to be dumped to the temporary file.
+        name : str
+            The name of the data.
+        wcs (optional) : astropy.wcs.WCS
+            The World Coordinate System (WCS) object associated with the data.
+            If not provided, the WCS object of the current instance will be used.
+
+        Returns
+        -------
+        None
         '''
-        images, output_wcs = gen_images_matched(
-            self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale, 
-            progress_bar=progress_bar, verbose=verbose)
+        filename = f'{self._temp_file_name}_{name}.fits'
 
-        self._fwhm_match = psf_fwhm
-        self._data_match = images
-        self._wcs_match = output_wcs
-        self._pxs_match = np.abs(output_wcs.wcs.cdelt[0]) * 3600
-        self._shape_match = output_wcs.pixel_shape
+        if wcs is None:
+            header = self._wcs.to_header()
+        else:
+            header = wcs.to_header()
 
-        if not skip_variance:
-            varmaps, output_wcs = gen_variance_matched(
-                self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale,
-                progress_bar=progress_bar, verbose=verbose)
-            self._vars_match = varmaps
+        hdul = fits.HDUList([fits.PrimaryHDU(data=data, header=header, do_not_scale_image_data=True)])
+        hdul.writeto(filename, overwrite=True)
 
-        if plot:
-            self.plot_atlas(
-                ncols=ncols, data_type='data_match', show_info='size', 
-                show_units='arcmin', interactive=False)
+    def dump_temp_mask(self, mask, name, wcs=None):
+        '''
+        Dump the mask to the temporary file.
+
+        Parameters
+        ----------
+        mask : numpy.ndarray
+            The mask to be dumped to the temporary file.
+        name : str
+            The name of the data.
+        wcs (optional) : astropy.wcs.WCS
+            The World Coordinate System (WCS) object associated with the data.
+            If not provided, the WCS object of the current instance will be used.
+
+        Returns
+        -------
+        None
+        '''
+        filename = f'{self._temp_file_name}_{name}.fits'
+        
+        if wcs is None:
+            header = self._wcs.to_header()
+        else:
+            header = wcs.to_header()
+
+        hdul = fits.HDUList([fits.PrimaryHDU(data=mask.astype(int), header=header, do_not_scale_image_data=True)])
+        hdul.writeto(filename, overwrite=True)
+    
+    def fetch_temp_image(self, name):
+        '''
+        Fetches the temporary image data with the given name.
+
+        Parameters
+        ----------
+        name : str 
+            The name of the temporary image extension.
+
+        Returns:
+            numpy.ndarray: The data of the temporary image.
+        '''
+        filename = f'{self._temp_file_name}_{name}.fits'
+
+        if os.path.exists(filename):
+            hdul = fits.open(filename)
+            data = hdul[0].data
+        else:
+            data = None
+        return data
+
+    def fetch_temp_mask(self, name):
+        '''
+        Fetches the temporary mask data with the given name.
+
+        Parameters
+        ----------
+        name : str 
+            The name of the temporary mask extension.
+
+        Returns:
+            numpy.ndarray: The data of the temporary image.
+        '''
+        filename = f'{self._temp_file_name}_{name}.fits'
+
+        if os.path.exists(filename):
+            hdul = fits.open(filename)
+            data = hdul[0].data.astype(bool)
+        else:
+            data = None
+        return data
+
+    def gen_photometry_aperture(self, filename):
+        hdul = fits.open(filename)
+        header = hdul[0].header
+        w0 = WCS(header)
+        w = self._wcs_match
+        pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
+        pxs_matched = self._pxs_match
+        ra = header['RA']
+        dec = header["DEC"]
+        pa0 = header["APER_PA"]
+        ep0 = (
+        header['XCOORD'] + header["APER_SMA"] * math.cos(pa0), header['yCOORD'] + header["APER_SMA"] * math.sin(pa0))
+        ep_world = w0.pixel_to_world(ep0[0], ep0[1])
+        ep = w.world_to_pixel(ep_world)
+        sky_coord = SkyCoord(ra, dec, unit='deg')
+        x, y = w.world_to_pixel(sky_coord)
+        sma = header["APER_SMA"] * pxs / pxs_matched
+        smb = header["APER_SMB"] * pxs / pxs_matched
+        pa = math.atan((ep[1] - y) / (ep[0] - x))
+
+        aper = EllipticalAperture((x, y), sma, smb, pa)
+
+        return aper
 
     def gen_mask_contaminant(self, image_index:int=None, expand_inner=1,
                              expand_edge=1, expand_outer=1, expand_manual=1, 
@@ -3763,6 +3789,113 @@ class Atlas(object):
         fig.canvas.mpl_connect('close_event', on_close)
         plt.show()
 
+    def match_mask_galaxy(self, mask, input_wcs, simplify=True, connectivity=8, 
+                          plot=False, ncols=1, verbose=False):
+        '''
+        Convert the target mask to the matched images. 
+
+        Parameters
+        ----------
+        mask : 2D array
+            The input mask.
+        input_wcs : WCS
+            The wcs of the input mask.
+        simplify : bool (default: True)
+            Simplify the mask with the convex hull if True.
+        connectivity : {4, 8} (default: 8)
+            The type of pixel connectivity used in determining how pixels are
+            grouped into a detected source. The options are 4 or 8 (default).
+            4-connected pixels touch along their edges. 8-connected pixels touch
+            along their edges or corners.
+        plot : bool (default: False)
+            Plot the matched images and masks if True.
+        ncols : int (default: 1)
+            Number of columns to plot.
+        verbose : bool (default: False)
+            Print additional info if True.
+        '''
+        assert getattr(self, '_wcs_match', None) is not None, 'Please run match_image() first!'
+        shape_out = self._wcs_match.pixel_shape
+
+        if simplify:
+            mask = simplify_mask(mask, connectivity=connectivity)
+
+        mask_out = adapt_mask(mask, input_wcs=input_wcs, 
+                              output_wcs=self._wcs_match, shape_out=shape_out)
+        
+        # Include the coverage mask
+        for img in self:
+            mask_coverage_org = getattr(img, '_mask_coverage', None)
+            if mask_coverage_org is not None:
+                mask_coverage = adapt_mask(
+                    mask_coverage_org, input_wcs=img._wcs, 
+                    output_wcs=self._wcs_match, shape_out=shape_out)
+                mask_out &= ~mask_coverage
+
+        # Exclude NaN
+        data_match = self.fetch_temp_image('data_match')
+        for loop in range(data_match.shape[0]):
+            mask_out &= ~np.isnan(data_match[loop, :, :])
+
+        self.dump_temp_mask(mask_out, 'mask_galaxy_match', wcs=self._wcs_match)
+
+        if plot:
+            nrows = int(np.ceil(self._n_image / ncols))
+
+            fig, axs = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
+            axs = axs.flatten()
+            fig.subplots_adjust(wspace=0.05, hspace=0.05)
+
+            self.plot_atlas(
+                ncols=ncols, data_type='data_match', show_info='size', 
+                show_units='arcmin', interactive=False, fig=fig, axs=axs)
+            
+            for loop in range(self._n_image):
+                plot_mask_contours(mask_out, ax=axs[loop], verbose=verbose, color='cyan')
+
+    def match_image(self, psf_fwhm, image_size, pixel_scale=None, 
+                    skip_variance=False, plot=False, ncols=3, 
+                    progress_bar=False, verbose=False):
+        '''
+        Generate the matched images.
+
+        Parameters
+        ----------
+        psf_fwhm : float
+            The PSF FWHM, units: arcsec
+        image_size : float
+            The size of the output image, units: arcsec
+        pixel_scale (optional) : float
+            The output pixel scale, units: arcsec. If not provided, half of
+            the psf_fwhm will be used to ensure the Nyquist sampling.
+        skip_variance : bool (default: False)
+            Skip matching the variance map if True.
+        progress_bar : bool (default: False)
+            The progress of the processed images.
+        verbose : bool (default: False)
+            Print details if True.
+        '''
+        images, output_wcs = gen_images_matched(
+            self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale, 
+            progress_bar=progress_bar, verbose=verbose)
+
+        self._fwhm_match = psf_fwhm
+        self._wcs_match = output_wcs
+        self._pxs_match = np.abs(output_wcs.wcs.cdelt[0]) * 3600
+        self._shape_match = output_wcs.pixel_shape
+        self.dump_temp_image(images, 'data_match', output_wcs)
+
+        if not skip_variance:
+            varmaps, output_wcs = gen_variance_matched(
+                self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale,
+                progress_bar=progress_bar, verbose=verbose)
+            self.dump_temp_image(varmaps, 'vars_match', output_wcs)
+
+        if plot:
+            self.plot_atlas(
+                ncols=ncols, data_type='data_match', show_info='size', 
+                show_units='arcmin', interactive=False)
+
     def plot_atlas(self, ncols=1, data_type='data', show_info:str=None,
                    show_units:str=None, show_mask_target=False, 
                    text_kwargs=None, fig=None, axs=None, norm_kwargs=None, 
@@ -3834,13 +3967,14 @@ class Atlas(object):
 
             # The matched data are saved separately in Atlas
             if data_type == 'data_match':
-                x = self._data_match[loop]
+                data_match = self.fetch_temp_image('data_match')
+                x = data_match[loop]
                 pixel_scale = self._pxs_match
             elif data_type == 'vars_match':
-                x = self._vars_match[loop]
+                vars_match = self.fetch_temp_image('vars_match')
+                x = vars_match[loop]
                 pixel_scale = self._pxs_match
             else:
-                #x = getattr(img, f'_{data_type}', None)
                 x = img.fetch_temp_image(data_type)
                 assert x is not None, f'Cannot find the data type ({data_type})!'
                 pixel_scale = img._pxs
@@ -3853,10 +3987,12 @@ class Atlas(object):
                     ha='left', va='top', transform=ax.transAxes, **text_kwargs)
 
             if show_mask_target:
-                assert hasattr(self, '_mask_target'), 'Please use set_mask_match() to set a mask first!'
+                mask_target = self.fetch_temp_mask('mask_target')
+                assert mask_target is not None, 'Please use set_mask_match() to set a mask first!'
+
                 xlim = ax.get_xlim()
                 ylim = ax.get_ylim()
-                plot_mask_contours(self._mask_target, verbose=verbose, ax=ax, 
+                plot_mask_contours(mask_target, verbose=verbose, ax=ax, 
                                    color='magenta', lw=0.5)
                 ax.set_xlim(xlim)
                 ax.set_ylim(ylim)
@@ -4042,14 +4178,19 @@ class Atlas(object):
                 header[f'BAND_{loop}'] = b
                 header[f'WAVE_{loop}'] = f'{w}'
         
-        image = np.array(self._data_match)
-        hduList.append(fits.ImageHDU(data=image, header=header, name='image'))
-        if self._vars_match is not None:
-            error = np.array(np.sqrt(self._vars_match))
+        #image = np.array(self._data_match)
+        data_match = self.fetch_temp_image('data_match')
+        hduList.append(fits.ImageHDU(data=data_match, header=header, name='image'))
+        
+        vars_match = self.fetch_temp_image('vars_match')
+        if vars_match is not None:
+            error = np.array(np.sqrt(vars_match))
             hduList.append(fits.ImageHDU(data=error, header=header, name='error'))
 
+        mask_galaxy_match = self.fetch_temp_mask('mask_galaxy_match')
         header = self._wcs_match.to_header()
-        hduList.append(fits.ImageHDU(self._mask_galaxy_match.astype(int), header=header, name=f'mask_galaxy'))
+        hduList.append(fits.ImageHDU(mask_galaxy_match.astype(int), 
+                                     header=header, name=f'mask_galaxy'))
 
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
@@ -4118,7 +4259,15 @@ class Atlas(object):
         if input_wcs is not None:
             mask = adapt_mask(mask, input_wcs, self._wcs_match, self._shape_match, verbose=verbose)
 
-        setattr(self, f'_{mask_type}', mask)
+        self.dump_temp_mask(mask, mask_type)
+
+    @property
+    def _temp_file_name(self):
+        '''
+        Get the temporary file name.
+        '''
+        filename = os.path.join(self._temp_dir, self._temp_name)
+        return filename
 
     def __getitem__(self, key):
         '''
