@@ -1882,7 +1882,7 @@ class Image(object):
         assert data is not None, 'The data is lacking!'
         assert data_subbkg is not None, 'The data_subbkg is lacking!'
         assert segment_outer is not None, 'Please run detect_source_extended() first!'
-        assert hasattr(self, '_wcs'), 'The _wcs is lacking!'
+        assert self._wcs is not None, 'The _wcs is lacking!'
 
         tb = select_segment_stars(data, segment_outer, self._wcs, 
                                   convolved_image=None, mask=mask, 
@@ -2185,7 +2185,7 @@ class Image(object):
 
         # initial detection
         if psf_fwhm is None:
-            assert hasattr(self, '_psf_fwhm_pix'), 'Please specify the parameter psf_fwhm or run get_PSF_profile()!'
+            assert self._psf_fwhm_pix is not None, 'Please specify the parameter psf_fwhm or run get_PSF_profile()!'
             psf_fwhm = self._psf_fwhm_pix
 
         daofind = DAOStarFinder(threshold=detect_thres * self._bkg_std, fwhm=psf_fwhm)
@@ -2539,7 +2539,7 @@ class Image(object):
         xscale, yscale : string (default: linear)
             The scale of the x and y axes.
         '''
-        assert hasattr(self, '_psf_data'), 'No PSF data!'
+        assert self._psf_data is not None, 'No PSF data!'
 
         if axs is None:
             fig, axs = plt.subplots(1, 3, figsize=(21, 7))
@@ -2555,7 +2555,7 @@ class Image(object):
         ax.set_title('(a) PSF data', fontsize=18)
 
         ax = axs[1]
-        if hasattr(self, '_rp'):
+        if self._rp is not None:
             ax.plot(self._rp[0] * self._pxs, self._rp[1], color='k')
             ax.axhline(y=0.5, ls='--', color='r')
             ax.xaxis.set_major_locator(locator)
@@ -2563,7 +2563,7 @@ class Image(object):
             ax.set_yscale(yscale)
             ax.minorticks_on()
 
-        if hasattr(self, '_psf_fwhm'):
+        if self._psf_fwhm is not None:
             ax.axvline(self._psf_fwhm / 2, ls='--', color='r')
             ax.text(0.95, 0.95, f'FWHM={self._psf_fwhm_pix:.2f}"', fontsize=18,
                     transform=ax.transAxes, ha='right', va='top')
@@ -2575,14 +2575,14 @@ class Image(object):
         ax.set_title('Radial profile', fontsize=18)
 
         ax = axs[2]
-        if hasattr(self, '_cog'):
+        if self._cog is not None:
             ax.plot(self._cog[0] * self._pxs, self._cog[1], color='k')
             ax.xaxis.set_major_locator(locator)
             ax.set_xscale(xscale)
             ax.set_yscale(yscale)
             ax.minorticks_on()
 
-        if hasattr(self, '_psf_enclose_radius'):
+        if self._psf_enclose_radius is not None:
             ax.axvline(self._psf_enclose_radius, ls='--', color='r')
             ax.text(0.95, 0.05, f'PSF enclose radius: {self._psf_enclose_radius:.2f}"', fontsize=18,
                     transform=ax.transAxes, ha='right', va='bottom')
@@ -3018,7 +3018,7 @@ class Image(object):
         self._header['PSCALE'] = self._pxs
         self._header['COMMENT'] = f'Reduced by PIXSED on {now.strftime("%d/%m/%YT%H:%M:%S")}'
 
-        if hasattr(self, '_phot_aper'):
+        if self._phot_aper is not None:
             self._header['APER_SMA'] = self._phot_aper.a
             self._header['APER_SMB'] = self._phot_aper.b
             self._header['APER_PA'] = self._phot_aper.theta
@@ -3044,7 +3044,7 @@ class Image(object):
                 if data is not None:
                     hduList.append(fits.ImageHDU(data, header=header_img, name=d))
 
-        if hasattr(self, '_psf_data'):
+        if self._psf_data is not None:
             header_psf = fits.Header()
             header_psf['FWHM'] = self._psf_fwhm
             header_psf['ENRADIUS'] = self._psf_enclose_radius
@@ -3068,7 +3068,7 @@ class Image(object):
         overwrite : bool (default: False)
             Overwrite the existing FITS file if True.
         '''
-        assert hasattr(self, mask_name), f'Cannot find the mask name ({mask_name})!'
+        assert getattr(self, mask_name) is not None, f'Cannot find the mask name ({mask_name})!'
         mask = getattr(self, mask_name).astype(int)
 
         hduList = [fits.PrimaryHDU(header=self._header)]
@@ -3204,6 +3204,8 @@ class Image(object):
             return self.fetch_temp_mask(name[1:])
         elif name[:5] == '_segm':
             return self.fetch_temp_segm(name[1:])
+        else:
+            return None
 
     def __repr__(self):
         '''
@@ -3284,12 +3286,12 @@ class Atlas(object):
         '''
         img_ref = Image(filename, verbose=verbose)
 
-        assert hasattr(img_ref, '_psf_enclose_radius'), \
-            'The psf_enclose_radius is required for a reference image file.'
+        #assert getattr(img_ref, '_psf_enclose_radius', None) is not None, \
+        #    'The psf_enclose_radius is required for a reference image file.'
 
         # The scale to interpolate mask
         if interpolate_scale is None:
-            assert hasattr(img_ref, '_psf_enclose_radius'), 'Need to provide the _psf_enclose_radius in the reference image!'
+            assert img_ref._psf_enclose_radius is not None, 'Need to provide the _psf_enclose_radius in the reference image!'
             # Take the PSF scale of the reference image if interpolate_scale is not specified
             self._mask_interpolate_scale = img_ref._psf_enclose_radius
         else:
