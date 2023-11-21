@@ -166,8 +166,8 @@ class Image(object):
         if coord_pix is not None:
             self._coord_pix = tuple(coord_pix)
 
-        if not hasattr(self, '_coord_pix'):
-            if (getattr(self, '_ra_deg', None) is not None):
+        if self._coord_pix is None:
+            if self._ra_deg is not None:
                 c_sky = read_coordinate(self._ra_deg, self._dec_deg)
                 ra_pix, dec_pix = self._wcs.world_to_pixel(c_sky)
                 self._coord_pix = (float(ra_pix), float(dec_pix))
