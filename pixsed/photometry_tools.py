@@ -2357,12 +2357,21 @@ class Image(object):
 
     def gen_data_variance(self, filename=None, extension=0, f_flux=0, box_size=None, filter_size=5):
         '''
-        Generate the data variance.
+        Generate the data variance, the unit of the input file should be Jy/pix.
+
+        Parameter
+        ----------
+        filename : string
+            The file name of the error image.
         '''
         if filename is not None:
             hdul = fits.open(filename)
-            data_variance = hdul[extension].data
+            # constructing a variance image from an input of uncertainty image, by simply takes square of the uncertainty image and store it into a new FITS file while retaining the header information.
+            data_variance = np.square(hdul[extension].data)
+            hdul.close()
+
         else:
+
             if box_size is None:
                 box_size = self._shape[0] // 50
 
@@ -2372,9 +2381,304 @@ class Image(object):
             data_subbkg = self.fetch_temp_image('data_subbkg')
             assert data_subbkg is not None, 'Cannot find the data_subbkg!'
 
-            data_variance = self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+            poisson_noise_variance = data_subbkg
+
+            #### Newly added 
+            band = self._band
+            if band == '2MASS_J' or band == '2MASS_H' or band == '2MASS_Ks' :
+                # `2MASS website <http://wise2.ipac.caltech.edu/staff/jarrett/2mass/3chan/noise/#coadd>`_.
+                gain_2mass = 10.0
+                Nc = 6.0
+                kc = 1.7 #kernel smoothing factor
+                poisson_noise_variance = data_subbkg
+                var_bkg = self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+                var_coadd = 1.0*np.square(2.0*kc)*var_bkg+np.square(1.0*0.024)*var_bkg
+                data_variance = poisson_noise_variance + var_bkg + var_coadd
+            # ------------------------------------------------------------------
+            else:
+                poisson_noise_variance = data_subbkg
+                data_variance = poisson_noise_variance + self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+
             data_variance[mask_galaxy] = (data_variance + np.square(f_flux * data_subbkg))[mask_galaxy]
         self.dump_temp_image(data_variance, 'data_variance')
+
+    def gen_data_variance_original(self, band, filename=None, unc_img=None, nsigma=2, kernel_fwhm=5, f_sample=1):
+        '''
+        Generate variance map combining poisson noise, background noise, dark variance, coadding noise from the original image files.
+
+        Parameter
+        ----------
+        band : string
+            The name of the filter.
+        filename (optional) : string
+            The FITS file name to load the data. Required for SDSS, WISE, Spitzer(IRAC/PACS)
+        unc_img (optional) : string
+            Input uncertainty image. Required for WISE and Spitzer. 
+        nsigma : float (default: 2)
+            The number of sigma as the threshold to generate a source mask.
+        kernel_fwhm : float (default: 5)
+            The FWHM of the kernel to convolve the image to generate a source 
+            mask.
+        f_sample : float (default: 1)
+            The fraction of the pixels that are used in calculating 
+            the background statistics, range (0, 1).
+
+        Returns
+        -------
+        var : 2D array
+            The variance image.
+
+        '''
+        assert hasattr(self, '_data_subbkg'), 'Please generate the _data_subbkg!'
+        image = self._data_subbkg
+        var_bkg = self.gen_variance_background(nsigma = nsigma, kernel_fwhm = kernel_fwhm, f_sample = f_sample)
+        
+        def var_from_unc(unc_image):
+            hdu = fits.open(unc_image)
+            header = hdu[0].header
+            data_unc_image = hdu[0].data
+            hdu.close()
+            var_unc = np.square(data_unc_image)
+            return var_unc
+
+        if band =='GALEX_FUV':
+            #https://asd.gsfc.nasa.gov/archive/galex/FAQ/counts_background.html 
+            exptime = self._header['EXPTIME']
+            var_poisson = image*1.40e-15/exp_time + (0.050*image)**2 # in the same unit as image: erg/s/cm^2/Ang or Jansky
+            var = var_poisson + var_bkg
+        elif band == 'GALEX_NUV':
+            #https://asd.gsfc.nasa.gov/archive/galex/FAQ/counts_background.html 
+            exptime = self._header['EXPTIME']
+            var_poisson = image*2.06e-16/exp_time + (0.027*image)**2 # in the same unit as image: erg/s/cm^2/Ang or Jansky 
+            var = var_poisson + var_bkg
+        elif band == 'SDSS_u' or band == 'SDSS_g' or band == 'SDSS_r' or band == 'SDSS_i' or band == 'SDSS_z' :
+            # https://dr16.sdss.org/datamodel/files/BOSS_PHOTOOBJ/frames/RERUN/RUN/CAMCOL/frame.html
+            def get_gain_dark_variance(band,run,camcol):
+                #### get gain: https://dr12.sdss.org/datamodel/files/BOSS_PHOTOOBJ/frames/RERUN/RUN/CAMCOL/frame.html, inherit from piXedfit
+                if camcol == 1:
+                    if band==1:
+                        gain = 1.62
+                    elif band==2:
+                        gain = 3.32
+                    elif band==3:
+                        gain = 4.71
+                    elif band==4:
+                        gain = 5.165
+                    elif band==5:
+                        gain = 4.745   
+                elif camcol == 2: 
+                    if band==1:
+                        if run > 1100:
+                            gain = 1.825
+                        else:
+                            gain = 1.595;
+                    elif band==2:
+                        gain = 3.855
+                    elif band==3:
+                        gain = 4.6
+                    elif band==4:
+                        gain = 6.565 
+                    elif band==5:
+                        gain = 5.155      
+                elif camcol == 3:
+                    if band==1:
+                        gain = 1.59 
+                    elif band==2:
+                        gain = 3.845
+                    elif band==3:
+                        gain = 4.72
+                    elif band==4:
+                        gain = 4.86 
+                    elif band==5:
+                        gain = 4.885
+                elif camcol == 4:
+                    if band==1:
+                        gain = 1.6 
+                    elif band==2:
+                        gain = 3.995
+                    elif band==3:
+                        gain = 4.76
+                    elif band==4:
+                        gain = 4.885
+                    elif band==5:
+                        gain = 4.775
+                elif camcol == 5:
+                    if band==1:
+                        gain = 1.47 
+                    elif band==2:
+                        gain = 4.05 
+                    elif band==3:
+                        gain = 4.725 
+                    elif band==4:
+                        gain = 4.64
+                    elif band==5:
+                        gain = 3.48      
+                elif camcol == 6:
+                    if band==1:
+                        gain = 2.17 
+                    elif band==2:
+                        gain = 4.035 
+                    elif band==3:
+                        gain = 4.895 
+                    elif band==4:
+                        gain = 4.76 
+                    elif band==5:
+                        gain = 4.69
+
+                #### get dark variance:
+                if camcol == 1:
+                    if band==1:
+                        dark_variance = 9.61
+                    elif band==2:
+                        dark_variance = 15.6025 
+                    elif band==3:
+                        dark_variance = 1.8225 
+                    elif band==4:
+                        dark_variance = 7.84 
+                    elif band==5:
+                        dark_variance = 0.81 
+                elif camcol == 2:
+                    if band==1:
+                        dark_variance = 12.6025
+                    elif band==2:
+                        dark_variance = 1.44
+                    elif band==3:
+                        dark_variance = 1
+                    elif band==4:
+                        if run < 1500:
+                            dark_variance = 5.76
+                        elif run > 1500:
+                            dark_variance = 6.25
+                    elif band==5:
+                        dark_variance = 1     
+                elif camcol == 3:
+                    if band==1:
+                        dark_variance = 8.7025 
+                    elif band==2:
+                        dark_variance = 1.3225 
+                    elif band==3:
+                        dark_variance = 1.3225 
+                    elif band==4:
+                        dark_variance = 4.6225 
+                    elif band==5:
+                        dark_variance = 1
+                elif camcol == 4:
+                    if band==1:
+                        dark_variance = 12.6025 
+                    elif band==2:
+                        dark_variance = 1.96 
+                    elif band==3:
+                        dark_variance = 1.3225
+                    elif band==4:
+                        if run < 1500:
+                            dark_variance = 6.25
+                        elif run > 1500:
+                            dark_variance = 7.5625
+                    elif band==5:
+                        if run < 1500:
+                            dark_variance = 9.61
+                        elif run > 1500:
+                            dark_variance = 12.6025  
+                elif camcol == 5:
+                    if band==1:
+                        dark_variance = 9.3025
+                    elif band==2:
+                        dark_variance = 1.1025 
+                    elif band==3:
+                        dark_variance = 0.81 
+                    elif band==4:
+                        dark_variance = 7.84
+                    elif band==5:
+                        if run < 1500:
+                            dark_variance = 1.8225
+                        elif run > 1500:
+                            dark_variance = 2.1025
+                elif camcol == 6:
+                    if band==1:
+                        dark_variance = 7.0225 
+                    elif band==2:
+                        dark_variance = 1.8225 
+                    elif band==3:
+                        dark_variance = 0.9025
+                    elif band==4:
+                        dark_variance = 5.0625 
+                    elif band==5:
+                        dark_variance = 1.21
+
+                return gain, dark_variance
+            
+            if band == 'SDSS_u':
+                band = 1
+            elif band == 'SDSS_g':
+                band = 2
+            elif band == 'SDSS_r':
+                band = 3
+            elif band == 'SDSS_i':
+                band = 4
+            elif band == 'SDSS_z':
+                band = 5
+            else:
+                print ("The band is not recognized!")
+                sys.exit()
+
+            run = int(self._header['run'])
+            camcol = int(self._header['camcol'])
+
+            # get the gain and dark variance
+            gain, dark_variance = get_gain_dark_variance(band,run,camcol)
+            hdul= fits.open(filename)
+            nmgy = hdul[1].data
+            hdul.close()
+            var_poisson_dark = np.zeros((image.shape[0],image.shape[1]))
+            for yy in range(0,image.shape[0]):
+                for xx in range(0,image.shape[1]):
+                    var_poisson = image/gain
+                    var_dark = dark_variance*nmgy[xx]*nmgy[xx]     ### in nanomaggy^2
+                    var_poisson_dark[yy][xx] = var_poisson + var_dark*0.000003631**2 # in Jansky^2
+            var = var_poisson_dark + var_bkg
+        elif band == '2MASS_J' or band == '2MASS_H' or band == '2MASS_Ks' :
+            # `2MASS website <http://wise2.ipac.caltech.edu/staff/jarrett/2mass/3chan/noise/#coadd>`_.
+            gain_2mass = 10.0
+            Nc = 6.0
+            kc = 1.7 #kernel smoothing factor
+            var_poisson = image#/gain_2mass/Nc
+            var_coadd = 1.0*np.square(2.0*kc)*var_bkg+np.square(1.0*0.024)*var_bkg
+            var = var_poisson + var_coadd
+        elif band == 'WISE_W1' or band == 'WISE_W2' or band == 'WISE_W3' or band == 'WISE_W4':
+            # https://wise2.ipac.caltech.edu/docs/release/allsky/expsup/sec2_3f.html
+            if band=='WISE_W1':
+                DN_to_Jy = 1.9350e-06
+            elif band=='WISE_W2':
+                DN_to_Jy = 2.7048E-06
+            elif band=='WISE_W3':
+                DN_to_Jy = 2.9045e-06
+            elif band=='WISE_W4':
+                DN_to_Jy = 5.2269E-05
+            
+            if unc_image is None:
+                raise KeyError(f'Missing ({band}) unc_file!')
+            var_unc = var_from_unc(unc_image)*DN_to_Jy**2
+            var = var_unc + var_bkg
+        elif band == 'IRAC_36' or band == 'IRAC_45' or band == 'IRAC_58' or band == 'IRAC_80' or band == 'MIPS_24':
+            if unc_image is None:
+                raise KeyError(f'Missing ({band}) unc_file!')
+            var_unc = var_from_unc(unc_image) # the error image unit in MJy/sr
+            var = var_unc*(2.350443e-5*img._pxs**2)**2 + var_bkg
+        elif band == 'PACS_70'or band == 'PACS_100' or band == 'PACS_160':
+            hdul= fits.open(filename)
+            error_image = hdul[5].data # for level 2.0 product, unit is Jy/pixel
+            hdul.close()
+            var = np.square(error_image) + var_bkg
+        elif band == 'SPIRE_250' or band == 'SPIRE_350' or band ==' SPIRE_500':
+            hdul= fits.open(filename)
+            error_image = hdul[2].data # the error image unit in MJy/sr
+            hdul.close()
+            var = np.square(error_image*2.350443e-5*img._pxs**2) + var_bkg
+        else:
+            print('Please input proper band name')
+        data_variance = var
+        self.dump_temp_image(data_variance, 'data_variance')
+
 
     def gen_variance_background(self, box_size=None, filter_size=5, nsigma=2, 
                                 kernel_fwhm=5, f_sample=1):
