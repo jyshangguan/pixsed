@@ -2383,21 +2383,21 @@ class Image(object):
 
             poisson_noise_variance = data_subbkg
 
-            #### Newly added 
-            band = self._band
-            if band == '2MASS_J' or band == '2MASS_H' or band == '2MASS_Ks' :
-                # `2MASS website <http://wise2.ipac.caltech.edu/staff/jarrett/2mass/3chan/noise/#coadd>`_.
-                gain_2mass = 10.0
-                Nc = 6.0
-                kc = 1.7 #kernel smoothing factor
-                poisson_noise_variance = data_subbkg
-                var_bkg = self.gen_variance_background(box_size=box_size, filter_size=filter_size)
-                var_coadd = 1.0*np.square(2.0*kc)*var_bkg+np.square(1.0*0.024)*var_bkg
-                data_variance = poisson_noise_variance + var_bkg + var_coadd
-            # ------------------------------------------------------------------
-            else:
-                poisson_noise_variance = data_subbkg
-                data_variance = poisson_noise_variance + self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+            # #### Newly added 
+            # band = self._band
+            # if band == '2MASS_J' or band == '2MASS_H' or band == '2MASS_Ks' :
+            #     # `2MASS website <http://wise2.ipac.caltech.edu/staff/jarrett/2mass/3chan/noise/#coadd>`_.
+            #     gain_2mass = 10.0
+            #     Nc = 6.0
+            #     kc = 1.7 #kernel smoothing factor
+            #     poisson_noise_variance = data_subbkg
+            #     var_bkg = self.gen_variance_background(box_size=box_size, filter_size=filter_size)
+            #     var_coadd = 1.0*np.square(2.0*kc)*var_bkg+np.square(1.0*0.024)*var_bkg
+            #     data_variance = poisson_noise_variance + var_bkg + var_coadd
+            # # ------------------------------------------------------------------
+            # else:
+            poisson_noise_variance = data_subbkg
+            data_variance = poisson_noise_variance + self.gen_variance_background(box_size=box_size, filter_size=filter_size)
 
             data_variance[mask_galaxy] = (data_variance + np.square(f_flux * data_subbkg))[mask_galaxy]
         self.dump_temp_image(data_variance, 'data_variance')
