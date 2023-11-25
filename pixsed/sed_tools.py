@@ -576,3 +576,9 @@ class SED_cube(object):
 
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
+
+
+class SED_fitter(object):
+    '''
+    The class of fitting a single SED.
+    '''
