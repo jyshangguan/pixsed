@@ -1,3 +1,4 @@
+import os
 import math
 import random
 
@@ -37,6 +38,9 @@ from shapely.affinity import scale
 from reproject import reproject_interp, reproject_adaptive
 
 stretchDict = {'asinh': AsinhStretch(), 'sqrt': SqrtStretch(), 'log': LogStretch()}
+
+file_path = os.path.abspath(os.path.dirname(__file__))
+package_path = '/'.join(file_path.split('/')[:-1])
 
 
 def adapt_mask(mask, input_wcs, output_wcs, shape_out, verbose=False):
