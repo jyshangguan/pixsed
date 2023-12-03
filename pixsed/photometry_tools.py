@@ -46,6 +46,7 @@ from .utils import select_segment_stars, segment_combine, segment_remove
 from .utils import clean_header_string, add_mask_circle, add_mask_rect
 from .utils import gen_images_matched, gen_variance_matched, image_photometry
 from .utils import gen_random_apertures, gen_aperture_ellipse
+from .utils import extract_fix_isophotes_ly
 from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
 mpl.rc("xtick", direction="in", labelsize=16)
@@ -1805,6 +1806,140 @@ class Image(object):
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
             ax.set_title('Galaxy model', fontsize=18)
+
+    def gen_model_galaxy_isophote(self, params={}, plot=False,
+                         fig=None, axs=None, norm_kwargs=None,
+                         interactive=False, verbose=False):
+        '''
+        Generate the galaxy model with galaxy model generated with isophote.
+
+        Parameters
+        ----------
+        params: dict
+            Input paramters to generate the isophote, necessary parameters include: e0, pa0, sma0.
+        plot : bool (default: False)
+            Plot the image and galaxy model if True.
+        fig : Matplotlib Figure
+            The figure to plot.
+        axs : Matplotlib Axes
+            The axes to plot. Two panels are needed.
+        norm_kwargs (optional) : dict
+            The keywords to normalize the data image.
+        interactive : bool (default: False)
+            Use the interactive plot if True.
+        verbose : bool (default: True)
+            Show details if True.
+        '''
+        data = self.fetch_temp_image('data_subbkg')
+        mask_contaminant = self.fetch_temp_mask('mask_contaminant')
+        mask_coverage = self.fetch_temp_mask('mask_coverage')
+        
+        assert data is not None, 'Please run background_subtract() first!!'
+        assert mask_contaminant is not None, 'Please run gen_mask_contaminant() first!'
+
+        if self._coord_pix is None:
+            if self._ra_deg is not None:
+                c_sky = read_coordinate(self._ra_deg, self._dec_deg)
+                ra_pix, dec_pix = self._wcs.world_to_pixel(c_sky)
+                self._coord_pix = (float(ra_pix), float(dec_pix))
+            else:
+                if verbose:
+                    print('[__init__] Please specify the target position!')
+        pixscale = self._pxs     
+              
+        params = {}
+        L = data.shape
+        params['xcen0'] = int(ra_pix)
+        params['ycen0'] = int(dec_pix)
+        params['pixscl'] = pixel_scale
+
+        ### first iteration, with the center not fixed
+        time_start = time.time()
+        geometry = EllipseGeometry(params['xcen0'], params['ycen0'], params['sma0'], params['e0'], params['pa0'])
+        ellipse = Ellipse(img_masked, geometry)
+        iso_free = ellipse.fit_image(fix_center=False, fix_pa=False, fix_eps=False, minsma=5, maxsma=1200, step=0.15, maxgerr=10)
+
+        time_end = time.time()
+        if verbose:
+            print('totally cost: ',int(time_end-time_start))  
+
+        kk = iso_free.sma*params['pixscl'] < 2600 #120#100
+        xcen = np.mean(iso_free.x0[kk])
+        ycen = np.mean(iso_free.y0[kk])
+        params.update({'xcen':xcen, 'ycen':ycen}) # your measured center
+        
+        if verbose:
+            print('The galaxy center: ', xcen, ycen) # in pixels
+            print('original center:',posi)
+
+        ### Second iter: fix the center, take a smaller step for fitting
+        time_start = time.time()
+        geometry = EllipseGeometry(params['xcen'], params['ycen'], params['sma0'], params['e0'], params['pa0'])
+        ellipse = Ellipse(img_masked, geometry)
+        iso_fixCen = ellipse.fit_image(fix_center=True, fix_pa=False, fix_eps=False, minsma=1, maxsma= 1000, step=0.1, maxgerr=10)
+        time_end = time.time()
+        if verbose:
+            print('totally cost: ',int(time_end-time_start)) 
+
+        ### Generate the model 
+        model_image = build_ellipse_model(img.shape, iso_fixCen) 
+        kk = img_object._mask_contaminant 
+        img_clean = copy.deepcopy(data)   
+        img_clean[kk] = model_image[kk]  
+
+        if plot:
+            if interactive:
+                ipy = get_ipython()
+                ipy.run_line_magic('matplotlib', 'tk')
+
+                def on_close(event):
+                    ipy.run_line_magic('matplotlib', 'inline')
+
+            if axs is None:
+                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig.subplots_adjust(wspace=0.05)
+            else:
+                assert fig is not None, 'Please provide fig together with axs!'
+
+            if interactive:
+                fig.canvas.mpl_connect('close_event', on_close)
+
+            if norm_kwargs is None:
+                norm_kwargs = dict(percent=99.99, stretch='asinh', asinh_a=0.001)
+            norm = simple_norm(data, **norm_kwargs)
+
+            ax = axs[0]
+            ax.imshow(data, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_title('Image', fontsize=18)
+
+            ax = axs[1]
+            plot_mask_contours(mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_title('Contaminant Mask', fontsize=18)
+
+            ax = axs[2]
+            ax.imshow(model_image, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_title('Galaxy Model', fontsize=18)
+
+            ax = axs[3]
+            ax.imshow(image_clean, origin='lower', cmap='Greys_r', norm=norm)
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+            ax.set_title('Cleaned image', fontsize=18)
+
 
     def gen_psf_model(self, extract_size=25, xmatch_radius=3, plx_snr=3,
                       threshold_flux=None, threshold_eccentricity=0.15,
