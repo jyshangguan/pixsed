@@ -1807,8 +1807,10 @@ class Image(object):
             ax.set_ylim(ylim)
             ax.set_title('Galaxy model', fontsize=18)
 
-    def gen_model_galaxy_isophote(self, params={}, plot=False,
-                         fig=None, axs=None, norm_kwargs=None,
+    def gen_model_galaxy_isophote(self, params=None, 
+                         minsma_1=5, maxsma_1=1200, step_1=0.15, maxgerr_1 = 10,
+                         minsma_2=1, maxsma_2=1000, step_2=0.1, maxgerr_2 = 10,
+                         plot=False, fig=None, axs=None, norm_kwargs=None,
                          interactive=False, verbose=False):
         '''
         Generate the galaxy model with galaxy model generated with isophote.
@@ -1817,6 +1819,8 @@ class Image(object):
         ----------
         params: dict
             Input paramters to generate the isophote, necessary parameters include: e0, pa0, sma0.
+        minsma_1, maxsma_1, step_1, maxgerr_1: float
+            The minimum semimajor axis, maximum semimajor axis, step size, max error.
         plot : bool (default: False)
             Plot the image and galaxy model if True.
         fig : Matplotlib Figure
@@ -1830,12 +1834,15 @@ class Image(object):
         verbose : bool (default: True)
             Show details if True.
         '''
+        import time
+        import copy
+        from photutils.isophote import build_ellipse_model, Ellipse, EllipseGeometry
         data = self.fetch_temp_image('data_subbkg')
         mask_contaminant = self.fetch_temp_mask('mask_contaminant')
-        mask_coverage = self.fetch_temp_mask('mask_coverage')
         
         assert data is not None, 'Please run background_subtract() first!!'
         assert mask_contaminant is not None, 'Please run gen_mask_contaminant() first!'
+        img_masked = np.ma.masked_array(data, mask_contaminant)
 
         if self._coord_pix is None:
             if self._ra_deg is not None:
@@ -1845,47 +1852,50 @@ class Image(object):
             else:
                 if verbose:
                     print('[__init__] Please specify the target position!')
-        pixscale = self._pxs     
+        else:
+            ra_pix, dec_pix = self._coord_pix    
               
-        params = {}
-        L = data.shape
+
+        assert params is not None, 'Please give input parameters to generate the isophotes!!'
         params['xcen0'] = int(ra_pix)
         params['ycen0'] = int(dec_pix)
-        params['pixscl'] = pixel_scale
+        params['pixscl'] = self._pxs
 
         ### first iteration, with the center not fixed
         time_start = time.time()
         geometry = EllipseGeometry(params['xcen0'], params['ycen0'], params['sma0'], params['e0'], params['pa0'])
         ellipse = Ellipse(img_masked, geometry)
-        iso_free = ellipse.fit_image(fix_center=False, fix_pa=False, fix_eps=False, minsma=5, maxsma=1200, step=0.15, maxgerr=10)
-
+        iso_free = ellipse.fit_image(fix_center=False, fix_pa=False, fix_eps=False, minsma=minsma_1, maxsma=maxsma_1, step=step_1, maxgerr=maxgerr_1)
         time_end = time.time()
         if verbose:
-            print('totally cost: ',int(time_end-time_start))  
+            print('First iteration with center not fixed. Time cost: ',int(time_end-time_start)) 
 
-        kk = iso_free.sma*params['pixscl'] < 2600 #120#100
+        kk = iso_free.sma*params['pixscl'] <= 2*maxsma_1
         xcen = np.mean(iso_free.x0[kk])
         ycen = np.mean(iso_free.y0[kk])
         params.update({'xcen':xcen, 'ycen':ycen}) # your measured center
         
-        if verbose:
-            print('The galaxy center: ', xcen, ycen) # in pixels
-            print('original center:',posi)
 
         ### Second iter: fix the center, take a smaller step for fitting
         time_start = time.time()
         geometry = EllipseGeometry(params['xcen'], params['ycen'], params['sma0'], params['e0'], params['pa0'])
         ellipse = Ellipse(img_masked, geometry)
-        iso_fixCen = ellipse.fit_image(fix_center=True, fix_pa=False, fix_eps=False, minsma=1, maxsma= 1000, step=0.1, maxgerr=10)
+        iso_fixCen = ellipse.fit_image(fix_center=True, fix_pa=False, fix_eps=False, minsma=minsma_2, maxsma=maxsma_2, step=step_2, maxgerr=maxgerr_2)
         time_end = time.time()
         if verbose:
-            print('totally cost: ',int(time_end-time_start)) 
+            print('Second iteration with center fixed. Time cost: ',int(time_end-time_start)) 
 
         ### Generate the model 
-        model_image = build_ellipse_model(img.shape, iso_fixCen) 
-        kk = img_object._mask_contaminant 
+        time_start = time.time()
+        model_image = build_ellipse_model(data.shape, iso_fixCen) 
+        time_end = time.time()
+        if verbose:
+            print('Time to generate the model image from isophotes: ', int(time_end-time_start))
+        kk = ask_contaminant 
         img_clean = copy.deepcopy(data)   
-        img_clean[kk] = model_image[kk]  
+        img_clean[kk] = model_image[kk] 
+
+        self.dump_temp_image(model_image, 'model_galaxy_isophote')
 
         if plot:
             if interactive:
@@ -1896,7 +1906,7 @@ class Image(object):
                     ipy.run_line_magic('matplotlib', 'inline')
 
             if axs is None:
-                fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)
+                fig, axs = plt.subplots(1, 4, figsize=(25, 7), sharex=True, sharey=True, dpi=100)
                 fig.subplots_adjust(wspace=0.05)
             else:
                 assert fig is not None, 'Please provide fig together with axs!'
@@ -1917,6 +1927,7 @@ class Image(object):
             ax.set_title('Image', fontsize=18)
 
             ax = axs[1]
+            ax.imshow(data, origin='lower', cmap='Greys_r', norm=norm)
             plot_mask_contours(mask_contaminant, ax=ax, verbose=verbose, color='cyan', lw=0.5)
             xlim = ax.get_xlim()
             ylim = ax.get_ylim()
