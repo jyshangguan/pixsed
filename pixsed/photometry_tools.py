@@ -1869,6 +1869,8 @@ class Image(object):
         time_end = time.time()
         if verbose:
             print('First iteration with center not fixed. Time cost: ',int(time_end-time_start)) 
+        
+        assert time_end-time_start > 1, 'Try another set of initial parameters for the first iterations of fitting.'
 
         kk = iso_free.sma*params['pixscl'] <= 2*maxsma_1
         xcen = np.mean(iso_free.x0[kk])
