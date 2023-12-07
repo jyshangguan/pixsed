@@ -1819,6 +1819,9 @@ class Image(object):
         ----------
         params: dict
             Input paramters to generate the isophote, necessary parameters include: e0, pa0, sma0.
+            e0: The ellipticity of the ellipse.
+            pa0: The position angle (radians) of the ellipse.
+            sma0: The semimajor axis length (pixels).
         minsma_1, maxsma_1, step_1, maxgerr_1: float
             The minimum semimajor axis, maximum semimajor axis, step size, max error.
         plot : bool (default: False)
@@ -1872,7 +1875,7 @@ class Image(object):
         
         assert time_end-time_start > 1, 'Try another set of initial parameters for the first iterations of fitting.'
 
-        kk = iso_free.sma*params['pixscl'] <= 2*maxsma_1
+        kk =  (iso_free.stop_code <= 2) 
         xcen = np.mean(iso_free.x0[kk])
         ycen = np.mean(iso_free.y0[kk])
         params.update({'xcen':xcen, 'ycen':ycen}) # your measured center
@@ -1893,7 +1896,7 @@ class Image(object):
         time_end = time.time()
         if verbose:
             print('Time to generate the model image from isophotes: ', int(time_end-time_start))
-        kk = ask_contaminant 
+        kk = mask_contaminant 
         img_clean = copy.deepcopy(data)   
         img_clean[kk] = model_image[kk] 
 
