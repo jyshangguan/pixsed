@@ -1824,6 +1824,10 @@ class Image(object):
             sma0: The semimajor axis length (pixels).
         minsma_1, maxsma_1, step_1, maxgerr_1: float
             The minimum semimajor axis, maximum semimajor axis, step size, max error.
+            maxsma=img_size/2*1.5
+            maxgerr:The maximum acceptable relative error in the local radial intensity gradient. 
+                This is the main control for preventing ellipses to grow to regions of too low signal-to-noise ratio.  
+                It specifies the maximum acceptable relative error in the local radial intensity gradient.  
         plot : bool (default: False)
             Plot the image and galaxy model if True.
         fig : Matplotlib Figure
