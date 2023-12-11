@@ -24,6 +24,7 @@ from .utils_sed import (binmap_voronoi, get_Galactic_Alambda,
                         get_Samples_Prospector, get_BestFit_Prospector, 
                         get_Models_Prospector, gen_image_phys) 
 from .utils_sed import read_fit_output, order_fit_output
+from .utils_sed import redchi2_two_seds, pixel_binning_images
 #from prospect.io import write_results as writer
 
 
@@ -154,6 +155,56 @@ class SED_cube(object):
         
         if plot:
             return axs
+
+    def binmap_AA17(self, ref_band=None, SNR=None, Dmin_bin=2.0, redc_chi2_limit=4.0, del_r=2.0, 
+                    ):
+        '''
+        Bin the image with the Abdurro’uf & Akiyama (2017) method.
+        https://ui.adsabs.harvard.edu/abs/2017MNRAS.469.2806A/abstract
+
+        Parameters
+        ----------
+        ref_band : int
+            The name of the reference band.
+        SNR:
+            S/N thresholds in all bands. The length of this array should be the same as the number of bands in the fits_fluxmap. 
+            S/N threshold can vary across the filters. If SNR is None, the S/N is set as 5.0 to all the filters. 
+        Dmin_bin: int
+            Minimum diameter of a bin in unit of pixel.
+        redc_chi2_limit : float
+            A maximum reduced chi-square value for a pair of two SEDs to be considered as having a similar shape. 
+        del_r : int
+            Increment of circular radius (in unit of pixel) adopted in the pixel binning process.
+        plot : bool (default: False)
+            Plot the results if True.
+        '''
+        
+        gal_region = self._mask_galaxy
+        sci_img = self._image
+        var_img = self._error
+
+
+        self._pixbin_map, self._map_bin_flux, self._map_bin_flux_err = pixel_binning_images(sci_img, 
+            var_img, gal_region, ref_band=ref_band, Dmin_bin=Dmin_bin, SNR=SNR, 
+            redc_chi2_limit=redc_chi2_limit, del_r=del_r)
+        
+        if plot:
+            from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+            fig1 = plt.figure(figsize=(7,7))
+            f1 = plt.subplot()
+            plt.xlabel("[pixel]", fontsize=18)
+            plt.ylabel("[pixel]", fontsize=18)
+
+            im = plt.imshow(self._pixbin_map, origin='lower', cmap='nipy_spectral_r', vmin=0, vmax=nbins_photo)
+
+            divider = make_axes_locatable(f1)
+            cax2 = divider.append_axes("top", size="7%", pad="2%")
+            cb = fig1.colorbar(im, cax=cax2, orientation="horizontal")
+            cax2.xaxis.set_ticks_position("top")
+            cax2.xaxis.set_label_position("top")
+            cb.ax.tick_params(labelsize=13)
+            cb.set_label('Bin Index', fontsize=17)
 
     def collect_sed(self, calib_error=None, A_V=0, model='F99', Rv='3.1', 
                     verbose=True):
