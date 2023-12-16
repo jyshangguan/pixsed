@@ -19,15 +19,7 @@ from prospect.fitting import lnprobfn, fit_model
 from prospect.io import read_results as reader
 
 from .utils import plot_segment_contours, plot_mask_contours
-
-
-import matplotlib as mpl
-mpl.rc("xtick", direction="in", labelsize=16)
-mpl.rc("ytick", direction="in", labelsize=16)
-mpl.rc("xtick.major", width=1., size=8)
-mpl.rc("ytick.major", width=1., size=8)
-mpl.rc("xtick.minor", width=1., size=5)
-mpl.rc("ytick.minor", width=1., size=5)
+from .utils_constants import ls_AA
 
 
 def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True, 
@@ -744,6 +736,27 @@ def read_fit_output(filename):
     with open(filename, 'rb') as f:
         fit_output = pickle.load(f)
     return fit_output
+
+
+def convert_mJy_to_flam(wave, flux):
+    '''
+    Convert the flux density from mJy to erg/s/cm2/Angstrom.
+    
+    Parameters
+    ----------
+    wave : 1D array
+        The wavelength in Angstrom.
+    flux : 1D array
+        The flux density in mJy.
+
+    Returns
+    -------
+    flam : 1D array
+        The flux in erg/s/cm2/Angstrom.
+    '''
+    fnu = flux * 1e-26  # erg/s/cm^2/Hz
+    flam = fnu * ls_AA / wave / wave  # erg/s/cm^2/Angstrom
+    return flam
 
 
 label_params = {'logmstar': r'$\log\,(M_*/M_\odot)$', 

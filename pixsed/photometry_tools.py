@@ -2361,7 +2361,7 @@ class Image(object):
         '''
         if filename is not None:
             hdul = fits.open(filename)
-            data_variance = hdul[extension].data
+            data_variance = np.square(hdul[extension].data)
         else:
             if box_size is None:
                 box_size = self._shape[0] // 50

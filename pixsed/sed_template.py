@@ -15,11 +15,12 @@ class Template(object):
     This is the object of a model template.
     '''
 
-    def __init__(self, TList, CList, XList, splev_k, parnames, modelInfo={}):
+    def __init__(self, TList, CList, XList, splev_k, wavelength, parnames, modelInfo={}):
         self._TList     = TList
         self._CList     = CList
         self._XList   = XList
         self._splev_k   = splev_k
+        self._wavelength = wavelength
         self._kdTree    = KDTree(XList)
         self._modelInfo = modelInfo
         self._parnames = parnames
@@ -60,9 +61,10 @@ def load_template(filename):
     XList = hdul['XList'].data
     TList = hdul['TList'].data
     CList = hdul['CList'].data
+    wavelength = hdul['Wavelength'].data['Wavelength']
     hdul.close()
 
-    template = Template(TList, CList, XList, splev_k, parnames)
+    template = Template(TList, CList, XList, splev_k, wavelength, parnames)
     return template
 
 
