@@ -500,7 +500,6 @@ class fsps_parametric(ComponentModel):
         '''
         Run SPS over logzsol in order to get necessary data in cache/memory.
         '''
-        print('haha')
         self._sps = StellarPopulation(**self._fsps_kwargs)
 
         low = self._priors['logzsol']['low']
