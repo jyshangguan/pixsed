@@ -1905,6 +1905,7 @@ class Image(object):
         img_clean[kk] = model_image[kk] 
 
         self.dump_temp_image(model_image, 'model_galaxy_isophote')
+        # self.dump_temp_image(img_clean, 'data_clean_isophote')
 
         if plot:
             if interactive:
@@ -1950,15 +1951,15 @@ class Image(object):
             ylim = ax.get_ylim()
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
-            ax.set_title('Galaxy Model', fontsize=18)
+            ax.set_title('Galaxy Model from Isophotes', fontsize=18)
 
             ax = axs[3]
-            ax.imshow(image_clean, origin='lower', cmap='Greys_r', norm=norm)
+            ax.imshow(img_clean, origin='lower', cmap='Greys_r', norm=norm)
             xlim = ax.get_xlim()
             ylim = ax.get_ylim()
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
-            ax.set_title('Cleaned image', fontsize=18)
+            ax.set_title('Cleaned Image from Isophotes', fontsize=18)
 
 
     def gen_psf_model(self, extract_size=25, xmatch_radius=3, plx_snr=3,
