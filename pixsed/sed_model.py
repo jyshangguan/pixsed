@@ -1,5 +1,8 @@
 from typing import Any
+from tqdm import tqdm
 import numpy as np
+from astropy import units
+
 from fsps import StellarPopulation
 from sedpy.observate import getSED
 from scipy.interpolate import interp1d
@@ -39,6 +42,8 @@ class SEDModel_single(object):
                 self._DL = 10
             else:
                 self._DL = cosmo.luminosity_distance(zred).value
+        else:
+            self._DL = DL
 
         self._model_dict = {}
         for mn, mp in models.items():
@@ -62,12 +67,14 @@ class SEDModel_single(object):
         self._parnames = []
         self._fix_params = {}
         self._priors = {}
+        self._params_physical = {}
         self._parslicer = {}
         pslicer1, pslicer2 = 0, 0
         for mn, mp in self._model_dict.items():
             self._parnames += [f'{mn}:{pn}' for pn in mp._parnames]
             self._fix_params.update({f'{mn}:{pn}' : v for pn, v in mp._fix_params.items()})
             self._priors.update({f'{mn}:{pn}' : v for pn, v in mp._priors.items()})
+            self._params_physical.update({f'{mn}:{pn}' : v for pn, v in mp._params_physical.items()})
 
             # The parameter slicer
             pslicer1 = pslicer2
@@ -75,10 +82,23 @@ class SEDModel_single(object):
             self._parslicer[mn] = slice(pslicer1, pslicer2)
         
         self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
+        self._params_label = self.get_params_label()
 
         self._verbose = verbose
         if verbose:
             print(self)
+
+    def gen_cache(self):
+        '''
+        Generate the cache for the models.
+        '''
+        for mn, mp in self._model_dict.items():
+            if mn == 'fsps_parametric':
+                mp.gen_cache()
+            elif mn == 'Cat3d_H_wind':
+                pass
+            else:
+                raise ValueError(f'The model {mn} is not recognised!')
 
     def gen_sed(self, params, filters):
         '''
@@ -109,9 +129,66 @@ class SEDModel_single(object):
         mdict = {}
         for mn, mp in self._model_dict.items():
             kwargs = dict(zip(mp._free_params, params[self._parslicer[mn]]))
-            mdict[mn] = mp(**kwargs)
+
+            try:
+                mdict[mn] = mp(**kwargs)
+            except Exception as e:
+                raise BadModelError('[SEDModel_single]: Bad model -- {}!'.format(e))
+
         return mdict
     
+    def gen_template_sum(self, params, wave_interp) -> np.array:
+        '''
+        Generate the sum of the model templates with the input values of the free parameters.
+
+        Parameters
+        ----------
+        params : dict
+            The list of the model parameters.
+        wave_interp : array_like
+            The wavelength array for the interpolation.
+
+        Returns
+        -------
+        flux_interp : array_like
+            The interpolated flux of the model templates.
+        '''
+        mdict = self.gen_templates(params)
+        flux_interp = []
+        for mp in mdict.values():
+            flux_interp.append(10**np.interp(np.log10(wave_interp), np.log10(mp[0]), np.log10(mp[1])))
+        flux_interp = np.sum(flux_interp, axis=0)
+        return flux_interp
+
+    def get_params_label(self):
+        '''
+        Return the labels of the parameters.
+        '''
+        params_label = {}
+        for mn, mp in self._model_dict.items():
+            params_label.update({f'{mn}:{pn}' : v for pn, v in mp._params_label.items() 
+                                 if ((pn in mp._free_params) or (pn in mp._params_physical))})
+        return params_label
+
+    def get_params_phy(self, params):
+        '''
+        Get the physical parameters from the model.
+        '''
+        params_phy = {}
+        for mn, mp in self._model_dict.items():
+            kwargs = dict(zip(mp._free_params, params[self._parslicer[mn]]))
+
+            if mn == 'fsps_parametric':
+                pdict = mp.get_params_phy(**kwargs)
+            elif mn == 'Cat3d_H_wind':
+                pdict = mp.get_params_phy(**kwargs)
+            else:
+                raise ValueError(f'The model {mn} is not recognised!')
+            
+            params_phy.update({f'{mn}:{pn}' : v for pn, v in pdict.items()})
+
+        return params_phy
+
     def params_random(self, nsample=1) -> list:
         '''
         Generate the random values of the free parameters according to 
@@ -125,7 +202,7 @@ class SEDModel_single(object):
                 params.append(np.random.normal(loc=self._priors[pn]['loc'], scale=self._priors[pn]['scale'], size=nsample))
             else:
                 raise ValueError(f'The prior type {self._priors[pn]["type"]} is not recognised!')
-        return params
+        return np.array(params)
     
     def plot_sed(self, params, filters=None, fig=None, ax=None, wave_plot=None, kwargs_sed=None):
         '''
@@ -151,10 +228,7 @@ class SEDModel_single(object):
             ax.plot(pwave, phots, **kwargs_sed)
 
         # Calculate the total model
-        flux_interp = []
-        for mp in mdict.values():
-            flux_interp.append(10**np.interp(np.log10(wave_plot), np.log10(mp[0]), np.log10(mp[1])))
-        flux_total = np.sum(flux_interp, axis=0)
+        flux_total = self.gen_template_sum(params, wave_plot)
         ax.plot(wave_plot, flux_total, color='red', lw=2, label='Total model')
 
         ax.legend(loc='best', fontsize=16)
@@ -182,11 +256,32 @@ class ComponentModel(object):
     The example of a component model.  All of the component models should be 
     consistent with this example.
     '''
-    def __init__(self, frame='obs', fix_params=None, verbose=True):
+    def __init__(self, frame='obs', fix_params=None, priors=None, verbose=True):
         self._frame = frame
-        self._fix_params = fix_params
+
+        # The name of all the model parameters
         self._parnames = ['zred', 'DL']
-        self._free_params = list(set(self._parnames) - set(self._fix_params.keys()))
+        # The label of all the parameters for plotting
+        self._params_label = []
+        # The name of the physical parameters and their units
+        self._params_physical = {}
+
+        # Fixed parameters
+        if fix_params is None:
+            self._fix_params = {}
+        else:
+            self._fix_params = fix_params
+
+        # The free parameters
+        self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
+
+        # The priors
+        if priors is None:
+            self._priors_input = {}
+        else:
+            self._priors_input = priors
+        self._priors = self.get_priors(**self._priors_input)
+        
         self._verbose = verbose
 
     def check(self) -> None:
@@ -194,6 +289,18 @@ class ComponentModel(object):
         Check the consistency of the model.
         '''
         pass
+
+    def get_params_phy(self, **kwargs):
+        '''
+        Get the physical parameters from the model.
+            
+        Parameters
+        ----------
+        kwargs : dict
+            All of the free parameters.
+        '''
+        params_phy = {}
+        return params_phy
 
     def get_priors(self, **priors_input) -> dict:
         '''
@@ -218,13 +325,43 @@ class fsps_parametric(ComponentModel):
     '''
 
     def __init__(self, frame='obs', fix_params=None, zcontinuous=1, imf_type=1, 
-                 sfh=4, dust_type=2, add_dust_emission=True, verbose=True, 
-                 priors=None, **fsps_kwargs):
+                 sfh=4, dust_type=2, add_dust_emission=True, priors=None, 
+                 verbose=True, **fsps_kwargs):
         '''
         Parameters
         ----------
         frame : str (default: 'obs')
             Frame of reference for the SED model. Valid values are 'rest' and 'obs'.
+        fix_params (optional) : dict
+            The fixed parameters.
+        zcontinuous : int (default: 1)
+            Whether to interpolate the metallicity table. 
+            0: no interpolation; 1: interpolate.
+        imf_type : int (default: 1)
+            The IMF type. 
+            0: Salpeter (1955); 1: Chabrier (2003); 2: Kroupa (2001); 3: van Dokkum (2008); 4: Dave (2008).
+        sfh : int (default: 4)
+            The SFH type.
+            0: SSP; 1: tau model; 4: delayed tau model; 5: delayed tau model with burst.
+        dust_type : int (default: 2)
+            The dust attenuation curve type. Default: Calzetti et al. (2000).
+        add_dust_emission : bool (default: True)
+            Whether to add the dust emission.
+        priors (optional) : dict
+            The priors of the free parameters. If not provided, the default.
+        verbose : bool (default: True)
+            Whether to print the model information.
+        fsps_kwargs : dict
+            Additional parameters of FSPS.
+
+        FSPS parameters
+        ---------------
+        zred : float
+            The redshift.
+        DL : float
+            The luminosity distance, units: Mpc.
+        logMtot : float
+            The total mass of stars on formation, units: log(Msun).
         '''
         self._frame = frame
         if frame == 'obs':
@@ -243,6 +380,7 @@ class fsps_parametric(ComponentModel):
             if 'sf_trunc' not in fix_params:
                 self._fix_params['sf_trunc'] = 0.0
         
+        # Note that the parameters of FSPS are not the same as the parameters of the model
         self._fsps_params = ['zcontinuous', 'imf_type', 'sfh', 'dust_type', 
                              'add_dust_emission', 'tage', 'logzsol', 'dust2', 
                              'duste_gamma', 'duste_umin', 'duste_qpah', 'tau', 
@@ -259,6 +397,36 @@ class fsps_parametric(ComponentModel):
             assert self._fsps_kwargs[k] == v, f'The input FSPS parameter ({k}) is not consistent!'
 
         self._parnames = ['zred', 'DL', 'logMtot', 'tage', 'logzsol', 'dust2']
+        self._params_label = {
+            'zred': r'$z_\mathrm{redshift}$',
+            'DL': r'$D_\mathrm{L}$ (Mpc)',
+            'logMtot': r'$\log\,(M_\mathrm{total}/M_\odot)$',
+            'tage': r'$t_\mathrm{age}$ (Gyr)',
+            'logzsol': r'$\log\,(Z/Z_\odot)$',
+            'dust2': r'$\tau_V$',
+            'duste_gamma': r'$\gamma_\mathrm{DL07}$',
+            'duste_umin': r'$U_\mathrm{min}$',
+            'duste_qpah': r'$q_\mathrm{PAH}$',
+            'tau': r'$\tau_\mathrm{SFH}$ (Gyr)',
+            'const': r'$f_\mathrm{const}$',
+            'fage_burst': r'$f_\mathrm{age, burst}$',
+            'tburst': r'$t_\mathrm{burst}$',
+            'fburst': r'$f_\mathrm{burst}$',
+            'sf_slope': r'$\alpha_\mathrm{SFH}$',
+            'sf_start': r'$t_\mathrm{start}$',
+            'sf_trunc': r'$t_\mathrm{trunc}$',
+            'logmstar': r'$\log\,(M_\star/M_\odot)$',
+            'sfr': r'$\mathrm{SFR}$ ($M_\odot\,\mathrm{yr}^{-1}$)',
+            'A_V': r'$A_V$',
+            'logmdust': r'$\log\,(M_\mathrm{dust}/M_\odot)$',
+        }
+        self._params_physical = {
+            'logmstar': 'solMass',
+            'sfr': 'solMass / yr',
+            'A_V': 'None',
+            'logmdust': 'solMass',
+        }
+
         if self._fsps_kwargs['add_dust_emission']:
             self._parnames += ['duste_gamma', 'duste_umin', 'duste_qpah']
 
@@ -266,6 +434,10 @@ class fsps_parametric(ComponentModel):
             self._parnames += ['tau', 'const', 'fage_burst', 'fburst', 'sf_start', 'sf_trunc']
         elif self._fsps_kwargs['sfh'] == 5:
             self._parnames += ['tau', 'sf_slope', 'fage_burst', 'fburst', 'sf_start', 'sf_trunc']
+        elif self._fsps_kwargs['sfh'] == 0:
+            self._parnames += ['tage']
+        else:
+            raise ValueError(f'The SFH type {self._fsps_kwargs["sfh"]} is not recognised!')
 
         self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
 
@@ -297,6 +469,94 @@ class fsps_parametric(ComponentModel):
         for pn in self._fix_params.keys():
             assert pn in self._parnames, f'Parameter {pn} is not in the model parameter list!'
 
+        assert self._priors['logzsol']['type'] == 'uniform', 'The prior of logzsol must be uniform!'
+
+    def complete_params(self, params):
+        '''
+        Complete the parameters with the fixed parameters.
+        
+        Parameters
+        ----------
+        params : dict
+            The parameters.
+
+        Returns
+        -------
+        params_complete : dict
+            The complete parameters.
+        '''
+        params_complete = {}
+        for pn in self._parnames:
+            if pn in self._fix_params:
+                params_complete[pn] = self._fix_params[pn]
+            elif pn in params:
+                params_complete[pn] = params[pn]
+            else:
+                raise ValueError(f'Missing parameter {pn}!')
+        
+        return params_complete
+
+    def gen_cache(self, step=0.01):
+        '''
+        Run SPS over logzsol in order to get necessary data in cache/memory.
+        '''
+        print('haha')
+        self._sps = StellarPopulation(**self._fsps_kwargs)
+
+        low = self._priors['logzsol']['low']
+        high = self._priors['logzsol']['high']
+        logzsol = np.arange(low, high, step)
+
+        if self._verbose:
+            print(f'Generating the cache for different logzsol (low={low}, high={high}, step={step})...')
+
+        for lz in logzsol:
+            self._sps.params['logzsol'] = lz
+            self._sps._compute_csp()
+
+    def get_labels(self, parname=None):
+        '''
+        Return the label(s) of the parameters.
+
+        Parameters
+        ----------
+        parname (optional) : str
+            The parameter name. If not provided, return the labels of all 
+            the free parameters.
+        
+        Returns
+        -------
+        label(s) : dict or str
+        '''
+        if parname is None:
+            return {pn:self._params_label[pn] for pn in self._free_params}
+        else:
+            return self._params_label.get(parname, None)
+
+    def get_params_phy(self, sfr_dt=0.1, **kwargs):
+        '''
+        Get the physical parameters from the FSPS model.
+        
+        Parameters
+        ----------
+        sfr_dt : float (default: 0.1)
+            The time interval for calculating the SFR, units: Gyr.
+        kwargs : dict
+            All of the free parameters.
+        '''
+        params = self.complete_params(kwargs)
+        self.update_fsps(params)
+        mass_total = 10**params['logMtot']
+
+        params_phy = {}
+        params_phy['logmstar'] = np.log10(self._sps.stellar_mass * mass_total)
+        params_phy['sfr'] = self._sps.sfr_avg(times=params['tage'], dt=sfr_dt) * mass_total
+        params_phy['A_V'] = self._sps.params['dust2'] * 2.5 * np.log10(np.e)
+
+        if self._sps.params['add_dust_emission']:
+            params_phy['logmdust'] = np.log10(self._sps.dust_mass * mass_total)
+        return params_phy
+
     def get_priors(self, **priors_input):
         '''
         Return the priors of the free parameters.
@@ -327,29 +587,51 @@ class fsps_parametric(ComponentModel):
                 priors[pn] = prior_default
         return priors
 
+    def params_random(self, nsample=1) -> np.array:
+        '''
+        Generate the random values of the free parameters according to 
+        the priors.
+        '''
+        params = []
+        for pn in self._free_params:
+            if self._priors[pn]['type'] == 'uniform':
+                params.append(np.random.uniform(low=self._priors[pn]['low'], high=self._priors[pn]['high'], size=nsample))
+            elif self._priors[pn]['type'] == 'normal':
+                params.append(np.random.normal(loc=self._priors[pn]['loc'], scale=self._priors[pn]['scale'], size=nsample))
+            else:
+                raise ValueError(f'The prior type {self._priors[pn]["type"]} is not recognised!')
+        return np.array(params)
+
+    def update_fsps(self, params):
+        '''
+        Update the FSPS parameters.
+
+        Parameters
+        ----------
+        params : dict
+            All the free parameters.
+        '''
+        for pn in params:
+            if pn in self._fsps_params:
+                self._sps.params[pn] = params[pn]
+            elif pn == 'fage_burst':
+                self._sps.params['tburst'] = params[pn] * params['tage']
+
     def __call__(self, **kwargs):
         '''
         Calculate the FSPS model flux for a given set of parameters.
+
+        Parameters
+        ----------
+        All of the free parameters.
 
         Returns
         -------
         wave, flux: 1D array
             The wavelength and flux of the model. Units: micron and mJy.
         '''
-        params = {}
-        for pn in self._parnames:
-            if pn in self._fix_params:
-                params[pn] = self._fix_params[pn]
-            elif pn in kwargs:
-                params[pn] = kwargs[pn]
-            else:
-                raise ValueError(f'Missing parameter {pn}!')
-        
-        for pn in params:
-            if pn in self._fsps_params:
-                self._sps.params[pn] = params[pn]
-            elif pn == 'fage_burst':
-                self._sps.params['tburst'] = params[pn] * params['tage']
+        params = self.complete_params(kwargs)
+        self.update_fsps(params)
 
         wave, spec = self._sps.get_spectrum(tage=params['tage'], peraa=False)
         wave /= 1e4  # micron
@@ -418,11 +700,24 @@ class Cat3d_H_wind(ComponentModel):
 
         self._r0 = 1.1  # pc
         self._parnames = ['a', 'h', 'N0', 'inc', 'f_wd', 'a_w', 'Theta_w', 'Theta_sig', 'logL', 'DL', 'zred']
+        self._params_label = {'zred': r'$z_\mathrm{redshift}$',
+                              'DL': r'$D_\mathrm{L}$ (Mpc)',
+                              'a': r'$a_\mathrm{CAT3D}$',
+                              'h': r'$h_\mathrm{CAT3D}$',
+                              'N0': r'$N_\mathrm{0,CAT3D}$',
+                              'inc': r'$i_\mathrm{CAT3D}$',
+                              'f_wd': r'$f_\mathrm{wd,CAT3D}$',
+                              'a_w': r'$a_\mathrm{wd,CAT3D}$',
+                              'Theta_w': r'$\theta_\mathrm{wd,CAT3D}$',
+                              'Theta_sig': r'$\theta_\mathrm{\sigma}$',
+                              'logL': r'$\log\,(L/\mathrm{erg\,s^{-1}})$',
+                            }
+
         self._template = load_template(self._template_path)
         self._template_params = self._template._parnames
 
-        #self._free_params = list(set(self._parnames) - set(self._fix_params.keys()))
         self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
+        self._params_physical = {}
 
         if priors is None:
             self._priors_input = {}
@@ -446,6 +741,25 @@ class Cat3d_H_wind(ComponentModel):
         for pn in self._fix_params.keys():
             assert pn in self._parnames, f'Parameter {pn} is not in the model parameter list!'
     
+    def get_labels(self, parname=None):
+        '''
+        Return the label(s) of the parameters.
+
+        Parameters
+        ----------
+        parname (optional) : str
+            The parameter name. If not provided, return the labels of all 
+            the free parameters.
+        
+        Returns
+        -------
+        label(s) : dict or str
+        '''
+        if parname is None:
+            return {pn:self._params_label[pn] for pn in self._free_params}
+        else:
+            return self._params_label.get(parname, None)
+
     def get_priors(self, **priors_input):
         '''
         Return the priors of the free parameters.
@@ -460,7 +774,7 @@ class Cat3d_H_wind(ComponentModel):
             'a_w' : dict(type='uniform', low=-3.0, high=0.0),
             'Theta_w' : dict(type='uniform', low=30, high=45),
             'Theta_sig' : dict(type='uniform', low=5, high=17.5),
-            'logL' : dict(type='uniform', low=40.0, high=48.0),
+            'logL' : dict(type='uniform', low=30.0, high=48.0),
             }
         
         priors = {}
@@ -551,3 +865,10 @@ class Cat3d_H_wind(ComponentModel):
             plist.append(f'Fixed parameters: {k} = {v}')       
         plist.append('Free parameters: {}'.format(','.join(self._free_params)))
         return '\n'.join(plist)
+    
+
+class BadModelError(Exception):
+    '''
+    The error for a bad model.
+    '''
+    pass
