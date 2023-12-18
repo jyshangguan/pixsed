@@ -158,7 +158,6 @@ class SEDfitter_single(object):
         '''
         Make the cache for the SED model.
         '''
-        print('test simple printout')
         if self._verbose:
             print(f'  Generating the cache for process {n}...')
         self._sedmodel.gen_cache()
