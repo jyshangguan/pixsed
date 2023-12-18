@@ -163,7 +163,7 @@ cython_debug/
 dev/
 
 # Template directory
-templates/
+templates/*.fits
 
 # Mac files
 .DS_Store
