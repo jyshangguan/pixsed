@@ -9,6 +9,7 @@ from vorbin.voronoi_2d_binning import voronoi_2d_binning
 from astroquery.ipac.irsa.irsa_dust import IrsaDust
 import corner
 import dill as pickle
+import scipy.stats as scp_stats
 
 from sedpy.observate import load_filters
 from prospect.utils.obsutils import fix_obs
@@ -757,6 +758,36 @@ def convert_mJy_to_flam(wave, flux):
     fnu = flux * 1e-26  # erg/s/cm^2/Hz
     flam = fnu * ls_AA / wave / wave  # erg/s/cm^2/Angstrom
     return flam
+
+
+def ptform_uniform(u, prior):
+    '''
+    Transform the Uniform(0, 1) sample to the model parameter value with the
+    uniform prior.
+
+    Parameters
+    ----------
+    u : float
+        The random number ~Uniform(0, 1).
+    prior : dict
+        The prior of the parameter, prior=dict(low, high).
+    '''
+    return (prior['high'] - prior['low']) * (u - 0.5) + (prior['high'] + prior['low']) * 0.5
+
+
+def ptform_gaussian(u, prior):
+    '''
+    Transform the Uniform(0, 1) sample to the model parameter value with the
+    Gaussian prior.
+
+    Parameters
+    ----------
+    u : float
+        The random number ~Uniform(0, 1).
+    prior : dict
+        The prior of the parameter, prior=dict(center=a, stddev=b).
+    '''
+    return scp_stats.norm.ppf(u, loc=prior['loc'], scale=prior['scale'])
 
 
 label_params = {'logmstar': r'$\log\,(M_*/M_\odot)$', 
