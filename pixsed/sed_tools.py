@@ -24,7 +24,8 @@ from .utils_sed import (binmap_voronoi, get_Galactic_Alambda,
                         get_Samples_Prospector, get_BestFit_Prospector, 
                         get_Models_Prospector, gen_image_phys) 
 from .utils_sed import read_fit_output, order_fit_output
-from .utils_sed import redchi2_two_seds, pixel_binning_images
+from .utils_sed import (redchi2_two_seds, centroid_SNR, increase_rad_center, increase_rad, 
+                        calc_pix_chi2, calc_chi2_center_edge, expand_pix,pixel_binning_images)
 #from prospect.io import write_results as writer
 
 
