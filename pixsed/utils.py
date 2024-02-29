@@ -16,7 +16,7 @@ from astropy.visualization import AsinhStretch, SqrtStretch, LogStretch
 from astropy.visualization import PercentileInterval, simple_norm
 from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.xmatch import XMatch
-from astropy.convolution import convolve
+from astropy.convolution import convolve, convolve_fft
 from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.modeling import models, fitting
@@ -1258,9 +1258,9 @@ def gen_images_kernel_matched(atlas, psf_fwhm: float, kernel_list, image_size: f
         data_clean = img.fetch_temp_image('data_clean')
         assert data_clean is not None, f'[gen_images_kernel_matched]: Generate the cleaned image of {img} first!'
 
-        if kernel_list[loop] != 'SKIP':
+        if not isinstance(kernel_list[loop], str):
             data_conv = convolve_fft(data_clean, kernel_list[loop], allow_huge=True)
-        else:
+        elif kernel_list[loop] == "SKIP": 
             if verbose:
                 print(f'[gen_images_kernel_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
             data_conv = data_clean
