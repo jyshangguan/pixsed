@@ -1202,6 +1202,76 @@ def gen_images_matched(atlas, psf_fwhm: float, image_size: float,
         del data_clean, data_conv
     return images, output_wcs
 
+def gen_images_kernel_matched(atlas, psf_fwhm: float, kernel_list, image_size: float,
+                       pixel_scale: float, progress_bar=False,
+                       verbose=False):
+    '''
+    Generate the matched images.
+
+    Parameters
+    ----------
+    atlas : Atlas
+        The Atlas object.
+    psf_fwhm : float
+        The PSF FWHM, units: arcsec
+    kernel_list : list
+        The kernels for psf matching. The list length should be the same as the number of atlas images. 
+        The elements in the list should be 2d arrays or 'SKIP'. Use 'SKIP' to avoid psf matching.
+    image_size : float
+        The size of the output image, units: arcsec
+    pixel_scale : float
+        The output pixel scale, units: arcsec. Please ensure the Nyquist sampling. eg, pxs = fwhm/2.24
+    progress_bar : bool (default: False)
+        The progress of the processed images.
+    verbose : bool (default: False)
+        Print details if True.
+
+    Returns
+    -------
+    images : list
+        List of matched images.
+    output_wcs : WCS
+        The WCS of the output images.
+    '''
+
+    if pixel_scale is None:
+        pixel_scale = psf_fwhm / 2.  # Nyquist sampling
+
+    image_size_pix = np.ceil(image_size / pixel_scale).astype(int)
+
+    output_wcs = WCS(naxis=2)
+    output_wcs.wcs.ctype = ['RA---TAN', 'DEC--TAN']
+    output_wcs.wcs.crval = [atlas._ra_deg, atlas._dec_deg]
+    output_wcs.wcs.crpix = image_size_pix // 2, image_size_pix // 2
+    output_wcs.wcs.cdelt = -1 * pixel_scale / 3600, pixel_scale / 3600
+    shape_out = (image_size_pix, image_size_pix)
+    output_wcs.pixel_shape = shape_out
+
+    images = []
+
+    if progress_bar:
+        imGen = tqdm.tqdm(atlas)
+    else:
+        imGen = atlas._image_list
+
+    for loop, img in enumerate(imGen):
+        data_clean = img.fetch_temp_image('data_clean')
+        assert data_clean is not None, f'[gen_images_kernel_matched]: Generate the cleaned image of {img} first!'
+
+        if kernel_list[loop] != 'SKIP':
+            data_conv = convolve_fft(data_clean, kernel_list[loop], allow_huge=True)
+        else:
+            if verbose:
+                print(f'[gen_images_kernel_matched]: Skip convolution of {img} (pixel scale: {img._psf_fwhm}")!')
+            data_conv = data_clean
+
+        data_rebin, _ = reproject_adaptive((data_conv, img._wcs), output_wcs,
+                                           shape_out=shape_out, kernel='gaussian',
+                                           conserve_flux=True,
+                                           boundary_mode='ignore')
+        images.append(data_rebin)
+        del data_clean, data_conv
+    return images, output_wcs
 
 def gen_variance_matched(atlas, psf_fwhm: float, image_size: float,
                          pixel_scale: float = None, progress_bar=False,

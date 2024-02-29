@@ -44,7 +44,7 @@ from .utils import get_image_segmentation, gen_image_mask, detect_source_extende
 from .utils import scale_mask, simplify_mask, add_mask_circle, adapt_mask, adapt_segmentation
 from .utils import select_segment_stars, segment_combine, segment_remove
 from .utils import clean_header_string, add_mask_circle, add_mask_rect
-from .utils import gen_images_matched, gen_variance_matched, image_photometry
+from .utils import gen_images_matched, gen_images_kernel_matched, gen_variance_matched, image_photometry
 from .utils import gen_random_apertures, gen_aperture_ellipse
 from .utils_interactive import MaskBuilder_segment, MaskBuilder_draw
 
@@ -3855,7 +3855,7 @@ class Atlas(object):
             for loop in range(self._n_image):
                 plot_mask_contours(mask_out, ax=axs[loop], verbose=verbose, color='cyan')
 
-    def match_image(self, psf_fwhm, image_size, pixel_scale=None, 
+    def match_image(self, psf_fwhm, image_size, kernel_list=None, pixel_scale=None, 
                     skip_variance=False, plot=False, ncols=3, 
                     progress_bar=False, verbose=False):
         '''
@@ -3867,6 +3867,10 @@ class Atlas(object):
             The PSF FWHM, units: arcsec
         image_size : float
             The size of the output image, units: arcsec
+        kernel_list: list
+            The kernels for psf matching. The list length should be the same as the number of atlas images. 
+            The elements in the list should be 2d arrays or None. Use None to avoid psf matching. 
+            If it is not None, will use these kernels to do the psf matching.
         pixel_scale (optional) : float
             The output pixel scale, units: arcsec. If not provided, half of
             the psf_fwhm will be used to ensure the Nyquist sampling.
@@ -3877,9 +3881,14 @@ class Atlas(object):
         verbose : bool (default: False)
             Print details if True.
         '''
-        images, output_wcs = gen_images_matched(
-            self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale, 
-            progress_bar=progress_bar, verbose=verbose)
+        if kernel_list is None:
+            images, output_wcs = gen_images_matched(
+                self, psf_fwhm, image_size=image_size, pixel_scale=pixel_scale, 
+                progress_bar=progress_bar, verbose=verbose)
+        else:
+             images, output_wcs = gen_images_kernel_matched(
+                self, psf_fwhm, kernel_list=kernel_list, image_size=image_size, pixel_scale=pixel_scale,
+                progress_bar=progress_bar, verbose=verbose)
 
         self._fwhm_match = psf_fwhm
         self._wcs_match = output_wcs
