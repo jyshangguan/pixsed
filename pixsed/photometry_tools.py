@@ -100,6 +100,8 @@ class Image(object):
 
             if pixel_scale is None:
                 self._pxs = np.abs(WCS(header).wcs.cdelt[0]) * 3600
+            else:
+                self._pxs = pixel_scale
 
         else:
             hdul = fits.open(filename)
@@ -1808,7 +1810,7 @@ class Image(object):
 
     def gen_psf_model(self, extract_size=25, xmatch_radius=3, plx_snr=3,
                       threshold_flux=None, threshold_eccentricity=0.15,
-                      num_lim=54, mask=None, oversampling=4,
+                      threshold_fwhm=5, num_lim=54, mask=None, oversampling=4,
                       smoothing_kernel='quadratic', maxiters=3,
                       progress_bar=False, skip_psf_model=False, plot=False,
                       fig=None, axs1=None, axs2=None, norm_kwargs=None, nrows=6,
@@ -1898,6 +1900,9 @@ class Image(object):
 
         if threshold_flux is not None:
             fltr &= tb['segment_flux'] < threshold_flux
+        
+        if threshold_fwhm is not None:
+            fltr &= tb['fwhm'] < threshold_fwhm
 
         tb_sel = tb[fltr]
 
@@ -1972,10 +1977,16 @@ class Image(object):
                 ax1, ax2, ax3 = axs1
 
             # Plot the star properties -- flux v.s. area
-            mp = ax1.scatter(np.log10(tb['segment_flux']), np.log10(tb['area']),
-                             c=tb['Gmag'])
+            if 'Gmag' in tb.colnames:
+                cmag = tb['Gmag']
+            else:
+                cmag = 'black'
+            #mp = ax1.scatter(np.log10(tb['segment_flux']), np.log10(tb['area']), c=cmag)
+            mp = ax1.scatter(np.log10(tb['segment_flux']), np.log10(tb['fwhm']), c=cmag)
 
-            ax1.plot(np.log10(tb_sel['segment_flux']), np.log10(tb_sel['area']),
+            #ax1.plot(np.log10(tb_sel['segment_flux']), np.log10(tb_sel['area']),
+            #         ls='none', marker='.', color='red', label='Selected')
+            ax1.plot(np.log10(tb_sel['segment_flux']), np.log10(tb_sel['fwhm']),
                      ls='none', marker='.', color='red', label='Selected')
 
             if threshold_flux is not None:
@@ -1983,11 +1994,12 @@ class Image(object):
 
             ax1.legend(loc='upper left', fontsize=18, handlelength=1)
             ax1.set_xlabel(r'$\log\,Flux$', fontsize=24)
-            ax1.set_ylabel(r'$\log\,(Area / \mathrm{pixel}^2)$', fontsize=24)
+            #ax1.set_ylabel(r'$\log\,(Area / \mathrm{pixel}^2)$', fontsize=24)
+            ax1.set_ylabel(r'$\log\,\mathrm{FWHM / pixel}$', fontsize=24)
             ax1.minorticks_on()
 
             # Plot the star properties -- flux v.s. eccentricity
-            mp = ax2.scatter(np.log10(tb['segment_flux']), tb['eccentricity'], c=tb['Gmag'])
+            mp = ax2.scatter(np.log10(tb['segment_flux']), tb['eccentricity'], c=cmag)
 
             ax2.plot(np.log10(tb_sel['segment_flux']), tb_sel['eccentricity'],
                      ls='none', marker='.', color='red')

@@ -1933,6 +1933,10 @@ def scale_mask(mask, factor, connectivity=8):
     -----
     [SGJY added]
     '''
+    if np.sum(mask == 0):
+        # Nothing to be scaled!!
+        return mask
+
     pList = get_mask_polygons(mask, connectivity=connectivity)
 
     sList = []
@@ -2134,18 +2138,29 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None,
     tb = cat.to_table()
     coo = tb['sky_centroid']
 
-    xmTb = Table([tb['label'], tb['xcentroid'], tb['ycentroid'], coo.ra.deg,
-                  coo.dec.deg, tb['area'], tb['semimajor_sigma'],
-                  tb['semiminor_sigma'], tb['orientation'],
-                  tb['eccentricity'], tb['segment_flux']],
-                 names=['label', 'x', 'y', 'ra', 'dec',
-                        'area', 'semimajor_sigma', 'semiminor_sigma',
-                        'orientation', 'eccentricity', 'segment_flux'])
-    tb_o = xmatch_gaiadr3(xmTb, radius=xmatch_radius, colRA1='ra', colDec1='dec')
+    if xmatch_radius is None:
+        tb_s = Table([tb['label'], tb['xcentroid'], tb['ycentroid'], coo.ra.deg,
+                      coo.dec.deg, tb['area'], tb['semimajor_sigma'],
+                      tb['semiminor_sigma'], tb['orientation'],
+                      tb['eccentricity'], tb['segment_flux'], cat.fwhm],
+                     names=['label', 'x', 'y', 'ra', 'dec',
+                            'area', 'semimajor_sigma', 'semiminor_sigma',
+                            'orientation', 'eccentricity', 'segment_flux', 'fwhm'])
+    else:
+        xmTb = Table([tb['label'], tb['xcentroid'], tb['ycentroid'], coo.ra.deg,
+                      coo.dec.deg, tb['area'], tb['semimajor_sigma'],
+                      tb['semiminor_sigma'], tb['orientation'],
+                      tb['eccentricity'], tb['segment_flux'], cat.fwhm],
+                     names=['label', 'x', 'y', 'ra', 'dec',
+                            'area', 'semimajor_sigma', 'semiminor_sigma',
+                            'orientation', 'eccentricity', 'segment_flux', 'fwhm'])
+        tb_o = xmatch_gaiadr3(xmTb, radius=xmatch_radius, colRA1='ra', colDec1='dec')
 
-    # Select the stars
-    fltr = ~tb_o['Plx'].mask & (tb_o['Plx'] / tb_o['e_Plx'] > plx_snr)
-    tb_s = tb_o[fltr]
+        # Select the stars
+        fltr = ~tb_o['Plx'].mask & (tb_o['Plx'] / tb_o['e_Plx'] > plx_snr)
+        tb_s = tb_o[fltr]
+
+    #tb_s.write('tb_s.fits', overwrite=True)
 
     if plot:
         fig, axs = plt.subplots(1, 2, figsize=(14, 7), sharex=True, sharey=True)

@@ -395,7 +395,7 @@ class SEDfitter_single(object):
 
         sampler.run_nested(**run_nested_kws)
         if self._verbose:
-            print('The sampline is finished!')
+            print('The sampling is finished!')
             
         if sampler_kws.get('pool', None) is not None:
             sampler.pool.close()
