@@ -96,12 +96,14 @@ def adapt_segmentation(segm, input_wcs, output_wcs, shape_out, verbose=False):
 
     if no_reproject:
         segm_data = segm.data.copy()
+        segm_data[np.isnan(segm_data)] = 0
 
         if verbose:
             print('[adapt_segmentation] Same WCS, no reprojection')
     else:
         segm_data, _ = reproject_interp((segm.data, input_wcs), output_wcs,
                                         shape_out=shape_out, order='nearest-neighbor')
+        segm_data[np.isnan(segm_data)] = 0
 
     segm_o = SegmentationImage(np.round(segm_data).astype(int))
     return segm_o
