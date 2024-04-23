@@ -1689,7 +1689,8 @@ class Image(object):
         bkg_estimator = MeanBackground()
         bkg = Background2D(data, box_size, mask=mask_background,
                            coverage_mask=mask_coverage, filter_size=filter_size,
-                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
+                           sigma_clip=sigma_clip, bkg_estimator=bkg_estimator,
+                           exclude_percentile=80.0)
         self.dump_temp_image(bkg.background, 'model_background')
         self.dump_temp_image(bkg.background_rms, 'model_background_rms')
 
@@ -1764,7 +1765,8 @@ class Image(object):
         model = Background2D(data, box_size, mask=mask_contaminant, 
                              coverage_mask=mask_coverage, 
                              filter_size=filter_size, sigma_clip=sigma_clip, 
-                             bkg_estimator=bkg_estimator)
+                             bkg_estimator=bkg_estimator,
+                             exclude_percentile=80.0)
         self.dump_temp_image(model.background, 'model_galaxy')
         self.dump_temp_image(model.background_rms, 'model_galaxy_rms')
 
@@ -2427,7 +2429,8 @@ class Image(object):
         bkg = Background2D(
             image, box_size, mask=mask, coverage_mask=mask_coverage, 
             filter_size=filter_size, sigma_clip=sigma_clip, 
-            bkg_estimator=bkg_estimator)
+            bkg_estimator=bkg_estimator,
+            exclude_percentile=80.0)
         var_bkg = np.square(bkg.background_rms)
         return var_bkg
 
