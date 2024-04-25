@@ -1704,7 +1704,7 @@ def multi_apertures_photometry(image, apertures, calibration_uncertainty=None,
 
     if bkgsub:
         aperstats = ApertureStats(image, annulus)
-        total_bkg = aperstats.mean * apertures_area
+        total_bkg = aperstats.median * apertures_area
         phot_bkgsub = np.array([phot_tb[i] - total_bkg[i] for i in range(len(apertures))])
     else:
         phot_bkgsub = np.array([phot_tb[i] for i in range(len(apertures))])
@@ -1749,8 +1749,11 @@ def multi_apertures_photometry(image, apertures, calibration_uncertainty=None,
         return phot_bkgsub
 
 def error_curve_fit(area, noise, standard_area=1, plot=False):
-    log_area = np.array([math.log10(i) for i in area])
-    log_noise = np.array([math.log10(i) for i in noise])
+    log_area = np.log10(area)
+    log_noise = np.log10(noise)
+    valid_mask = ~np.isnan(log_area) & ~np.isnan(log_noise) & ~np.isinf(log_area) & ~np.isinf(log_noise)
+    log_area = log_area[valid_mask]
+    log_noise = log_noise[valid_mask]
     curve = np.polyfit(log_area, log_noise, 1)
     slope = curve[0]
     intercept = curve[1]
