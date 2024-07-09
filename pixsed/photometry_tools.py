@@ -577,6 +577,204 @@ class Image(object):
         from shutil import rmtree
         rmtree(self._temp_dir)
 
+    def destrip_image(img, wavelet = 'db1', 
+                        scale_low = 5, scale_high = 8, FFT_clip = 0.9, 
+                        scale ='medium', r_cut = 100, plot=True):
+        """
+        Remove the strips from the SDSS images
+        Need to run the method twice to conduct the medium scale wavelet and the small scale wavelet transformation.
+        Referenced from Qifeng Huang's method:https://github.com/BetaGem/IRAS_destripping.
+
+        """
+        # 0. Prepare the image, mask the source
+        import pywt
+        data_ori = img.fetch_temp_image('data')
+        data = data_ori[:,:8000]
+        vmin, vmax = np.percentile(data, 5), np.percentile(data, 99.7)
+        mask_coverage = img.fetch_temp_mask('mask_coverage')
+        mask_background_ori = img.fetch_temp_mask('mask_background')
+        mask_background = mask_background_ori.copy()[:,:8000]
+        data_clip = data.copy()
+        data_clip[mask_background] = np.median(data) # fill point sources with image average. better to use some interpolation methods.
+        if plot == True:
+            plt.figure(figsize=(12,4))
+            plt.subplot(121)
+            norm_kwargs=dict(percent=80, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(data, **norm_kwargs)
+            plt.imshow(data, norm=norm, cmap='gray')
+            plt.title('Original image')
+            plt.colorbar()
+            plt.subplot(122)
+            norm_kwargs=dict(percent=80, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(data_clip, **norm_kwargs)
+            plt.imshow(data_clip,cmap='gray',norm=norm)
+            plt.title('Clipped image')
+            plt.colorbar()
+
+        # 1. wavelet filtering
+
+        coeff_list = pywt.wavedec2(data_clip, wavelet, mode='symmetric', level=None, axes=(-2, -1))
+        # print(coeff_list[0])
+
+        # get large-scale image
+        coeff_large = coeff_list.copy()
+        for filter in range(scale_low, len(coeff_large)):
+            for arr in range(3):
+                coeff_large[filter][arr][:,:] = 0
+        scale_large = pywt.waverec2(coeff_large, wavelet, mode='symmetric', axes=(-2, -1))
+
+        # get med-scale image
+        coeff_list = pywt.wavedec2(data_clip, wavelet, mode='symmetric', level=None, axes=(-2, -1))
+        coeff_med = coeff_list.copy()
+        for filter in range(scale_high, len(coeff_large)):
+            for arr in range(3):
+                coeff_med[filter][arr][:,:] = 0
+        for filter in range(1, scale_low):
+            for arr in range(3): 
+                coeff_med[filter][arr][:,:] = 0
+        coeff_med[0][:,:] = np.mean(coeff_med[0])# remove the structure at the centre
+        scale_med = pywt.waverec2(coeff_med, wavelet, mode='symmetric', axes=(-2, -1))
+
+        # get small-scale image
+        coeff_list = pywt.wavedec2(data_clip, wavelet, mode='symmetric', level=None, axes=(-2, -1))
+        coeff_small = coeff_list.copy()
+        for filter in range(1, scale_high):
+            for arr in range(3): 
+                coeff_small[filter][arr][:,:] = 0
+        coeff_small[0][:,:] = np.mean(coeff_small[0])
+        scale_small = pywt.waverec2(coeff_small, wavelet, mode='symmetric', axes=(-2, -1))
+        if plot == True:
+            plt.figure(figsize=(14,4))
+            plt.subplot(131)
+            norm_kwargs=dict(percent=80, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(scale_large, **norm_kwargs)
+            plt.imshow(scale_large, cmap='gray',norm=norm)
+            plt.title('Large-scale image')
+            plt.colorbar()
+            plt.subplot(132)
+            norm_kwargs=dict(percent=80, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(scale_med, **norm_kwargs)
+            plt.imshow(scale_med, cmap='gray',norm=norm)
+            plt.title('Med-scale image')
+            plt.colorbar()
+            plt.subplot(133)
+            norm_kwargs=dict(percent=80, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(scale_small, **norm_kwargs)
+            plt.imshow(scale_small, cmap='gray',norm=norm)
+            plt.title('Small-scale image')
+            plt.colorbar()
+        
+        # 2. FFT of the small_scale image
+        print('Start FFT')
+        from numpy.fft import fft2, ifft2, fftshift
+        if scale=='small':
+            small_fft = fftshift(fft2(scale_small))
+        elif scale=='medium':
+            small_fft = fftshift(fft2(scale_med))
+        elif scale=='large':
+            small_fft = fftshift(fft2(scale_large))
+        else:
+            print('scale not right')
+        # replace the "spikes" by the averaged azimuthal magnitude.
+        c = len(small_fft) // 2
+        print('c',c)
+        ## polar coordinate
+        indy, indx = np.indices(small_fft.shape)
+        r = np.sqrt((indx - c + 0.5)**2 + (indy - c + 0.5)**2)
+        phi = np.floor( np.arctan2(- indy + c - 0.5, indx - c + 0.5) * 180 / np.pi )
+        phi += 180
+
+        ## mean value in each direcion
+        dir_mean_val = [np.median(np.abs(small_fft)[(phi == i) & (r < r_cut)]) for i in range(360)]
+
+        ## find the outliers
+        med, std  = np.median(dir_mean_val), np.std(dir_mean_val)
+        thresh = med + FFT_clip*std
+        theta_clip = np.where(dir_mean_val > thresh)[0]
+        theta_clip_map = np.full(small_fft.shape, False)
+        for theta in theta_clip:
+            theta_clip_map[phi == theta] = True
+
+        # fill the clipped direction with azimuthal average value
+        small_fft_clip = small_fft.copy().astype('complex64')
+        small_fft_abs = np.abs(small_fft)
+
+        # profile of the fft image
+        prof_r = np.arange(int(300 * 1.414))
+        prof_val = np.full(prof_r.shape, 0.)
+
+        for rr in prof_r:
+            print(rr)
+            prof_val[rr] = np.mean(np.abs(small_fft_abs[(np.abs(r - rr) < 1) & (~theta_clip_map)]))
+            
+        from scipy.interpolate import Akima1DInterpolator
+        profile = Akima1DInterpolator(prof_r, prof_val)
+
+        for theta in theta_clip:
+            ii, jj = np.where(phi == theta)
+            print(theta)
+            for i, j in zip(ii, jj):
+                dist = np.sqrt((i - c + 0.5)**2 + (j - c + 0.5)**2)
+                if dist  <10: continue
+                shrink_factor = small_fft_abs[i][j] / profile(dist)
+                small_fft_clip[i][j] /= shrink_factor
+        small_fft_clip[np.isnan(small_fft_clip)]=0.0
+
+        if plot ==True:
+            plt.figure(figsize=(12,4))
+            plt.subplot(131)
+            plt.title("FFT")
+            plt.imshow(np.abs(small_fft[3900:4100,3900:4100].real), vmin=0, vmax=0.01, cmap='jet')
+            plt.subplot(132)
+            plt.title("FFT clipped")
+            plt.imshow(np.abs(small_fft_clip[3900:4100,3900:4100].real), vmin=0, vmax=0.01, cmap='jet')
+            plt.subplot(133)
+            plt.hist(dir_mean_val, bins=50);
+            plt.axvline(thresh, c='k')
+            plt.title("average values in all directions")
+            plt.tight_layout()
+
+        # 3. reconstruct destripped image
+        scale_small_clip = ifft2(fftshift(small_fft_clip)).real
+        coeff_small_clip = pywt.wavedec2(scale_small_clip, wavelet, mode='symmetric', level=None, axes=(-2, -1))
+
+        coeff_rec = []
+        for i in range(len(coeff_small_clip)):
+            if i < 5:
+                coeff_rec.append(coeff_large[i])
+            elif i > 7:
+                coeff_rec.append(coeff_small[i])
+            else:
+                coeff_rec.append(coeff_small_clip[i])
+
+        img_rec = pywt.waverec2(coeff_rec, wavelet, mode='symmetric', axes=(-2, -1))
+
+        # add point sources back
+        # img_rec[point_source] = data[point_source] + img_rec[point_source] - fill_value
+        img_rec[mask_background] = data[mask_background] #+ img_rec[mask_background] #- fill_value
+        if plot==True:
+            # display the results!
+            plt.figure(figsize=(12, 5))
+            plt.subplot(121)
+            norm_kwargs=dict(percent=90, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(data, **norm_kwargs)
+            plt.imshow(data,norm=norm , cmap='gray')
+            plt.title("Original image", fontsize=18)
+            plt.colorbar()
+            plt.subplot(122)
+            norm_kwargs=dict(percent=90, stretch='asinh', asinh_a=0.5)
+            norm = simple_norm(img_rec, **norm_kwargs)
+            plt.imshow(img_rec, norm=norm, cmap='gray')
+            plt.title("Destripped image", fontsize=18)
+            plt.colorbar()
+            # plt.subplot(133)
+            # plt.imshow((img_rec - data) / data, vmin=-.1, vmax=.1, cmap='gray')
+            # plt.title("Residual", fontsize=18)
+            # plt.colorbar()
+        self.dump_temp_image(img_rec, 'img_destripped')
+        return img_rec
+
+
     def detect_source_outer_and_middle(self, threshold_o: float, threshold_i: float, threshold_inner_galaxy: float,
                                        npixels_o=5, npixels_i=5, nlevels_o=32,
                                        nlevel_i=256, contrast_o=0.001, contrast_i=1e-6,
