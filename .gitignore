@@ -170,4 +170,5 @@ templates/*.fits
 
 # Demo
 demo/temp/*
+demo/data/*
 demo/data/*_clean.fits
