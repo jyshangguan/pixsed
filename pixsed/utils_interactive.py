@@ -324,14 +324,8 @@ class MaskBuilder_draw:
                 header = wcs.to_header()
             else:
                 header = None
-            hdu = fits.ImageHDU(data=self._mask_manual.astype(int), header=header, name='mask_manual')
-
-            hdul = fits.open(filename, mode='update')
-            if 'mask_manual' in hdul:
-                hdul.pop('mask_manual')
-        
-            hdul.append(hdu)
-            hdul.close()
+            hdul = fits.HDUList([fits.PrimaryHDU(data=self._mask_manual.astype(int), header=header, do_not_scale_image_data=True)])
+            hdul.writeto(filename, overwrite=True)
 
     def plot_mask_manual(self):
         '''

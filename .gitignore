@@ -167,3 +167,7 @@ templates/*.fits
 
 # Mac files
 .DS_Store
+
+# Demo
+demo/temp/*
+demo/data/*_clean.fits

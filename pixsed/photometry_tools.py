@@ -485,7 +485,7 @@ class Image(object):
         elif mask_type == 'subbkg':
             if data is None:
                 raise ValueError(
-                    'The background-subtracted data (_data_subbkg) is not generated! Please run background_subtract2()!')
+                    'The background-subtracted data (_data_subbkg) is not generated! Please run background_subtract()!')
 
             if mask_background is None:
                 raise ValueError(
@@ -1550,7 +1550,7 @@ class Image(object):
             mb.on_press(event)
 
         def on_close(event):
-            filename = f'{self._temp_path}/{self._temp_name}'
+            filename = f'{self._temp_file_name}_mask_manual.fits'
             mb.on_close(event, filename=filename, wcs=self._wcs)
 
         # Start to work
