@@ -306,6 +306,8 @@ class MaskBuilder_draw:
                     self.print_action('Less than 3 recorded positions!\nUse ESC to discard the current drawing.')
 
         elif event.key == 'escape':
+            # FIXME: Need to add action to discard the current drawing
+
             self._mode = 'None'  # Change back to None
             self._click_pos = []  # reset the click_pos
             self.print_mode()
