@@ -3080,11 +3080,12 @@ class Image(object):
         overwrite : bool (default: False)
             Overwrite the existing FITS file if True.
         '''
-        assert getattr(self, mask_name) is not None, f'Cannot find the mask name ({mask_name})!'
-        mask = getattr(self, mask_name).astype(int)
+        #assert getattr(self, mask_name) is not None, f'Cannot find the mask name ({mask_name})!'
+        #mask = getattr(self, mask_name).astype(int)
+        mask = self.fetch_temp_mask(mask_name)
 
         hduList = [fits.PrimaryHDU(header=self._header)]
-        hduList.append(fits.ImageHDU(mask, header=self._wcs.to_header(),
+        hduList.append(fits.ImageHDU(mask.astype(int), header=self._wcs.to_header(),
                                      name=mask_name))
 
         hdul = fits.HDUList(hduList)
