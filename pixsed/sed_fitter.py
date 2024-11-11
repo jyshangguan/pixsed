@@ -272,8 +272,15 @@ class SEDfitter_single(object):
         for k, v in tdict.items():
             if k == 'total_model':
                 flux_total_l, flux_total, flux_total_h = np.percentile(v, [16, 50, 84], axis=0)
-                ax0.plot(wave_plot, flux_total, color='red', ls='-', lw=2, label='Model')
+                ax0.plot(wave_plot, flux_total, color='red', ls='-', lw=2, label='Model spectrum')
                 ax0.fill_between(wave_plot, flux_total_l, flux_total_h, color='red', alpha=0.2)
+
+                # plot the model photometric points
+                wave_aa = wave_plot * 1e4
+                flam = convert_mJy_to_flam(wave_aa, flux_total)
+                phots = getSED(wave_aa, flam, self._filters, linear_flux=True) * 3.631e6  # mJy
+                ax0.scatter(pwave, phots, color='k', edgecolor='red', s=40, marker='s', lw=1.5, 
+                            zorder=4, label='Model photometry')
             else:
                 v = np.array(v)
                 wave = v[0, 0, :]

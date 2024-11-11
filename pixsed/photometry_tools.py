@@ -509,11 +509,15 @@ class Image(object):
         self._bkg_mean, self._bkg_median, self._bkg_std = res
         return self._bkg_mean, self._bkg_median, self._bkg_std
 
-    def background_subtract(self, plot=False, norm_kwargs=None):
+    def background_subtract(self, background_type='median', plot=False, norm_kwargs=None):
         '''
         Remove the background of the image data.
         Parameter
         ----------
+        background_type : string (default: 'median')
+            The type of background to be removed. 
+            The options are 'median', 'mean', and 'model'.
+            The 'model' option requires the background model to be generated in advance.
         plot : bool (default: False)
             Plot the data and segmentation map if True.
         norm_kwargs (optional) : dict
@@ -523,10 +527,18 @@ class Image(object):
         -----
         [SGJY added]
         '''
-        model_background = self.fetch_temp_image('model_background')
-        assert model_background is not None, 'Please run background_model() first!'
-
         data = self.fetch_temp_image('data')
+
+        if background_type == 'median':
+            model_background = np.full_like(data, self._bkg_median)
+        elif background_type == 'mean':
+            model_background = np.full_like(data, self._bkg_mean)
+        elif background_type == 'model':
+            model_background = self.fetch_temp_image('model_background')
+            assert model_background is not None, 'Please run background_model() first!'
+        else:
+            raise ValueError(f'Cannot recognize the background_type ({background_type})!')
+
         data_subbkg = data - model_background
         self.dump_temp_image(data_subbkg, name='data_subbkg')
 
@@ -1299,18 +1311,32 @@ class Image(object):
         -----
         [SGJY added]
         '''
+        mList = []
+
         mask_inner = self.gen_mask_inner(expand_factor=expand_inner, plot=False, verbose=verbose)
+        if mask_inner is not None:
+            mList.append(mask_inner)
+        
         mask_edge = self.gen_mask_edge(expand_factor=expand_edge, plot=False, verbose=verbose)
+        if mask_edge is not None:
+            mList.append(mask_edge)
+        
         mask_outer = self.gen_mask_outer(expand_factor=expand_outer, plot=False, verbose=verbose)
-
-        mask_contaminant = mask_inner | mask_edge | mask_outer
-
+        if mask_outer is not None:
+            mList.append(mask_outer)
+        
         # Include the manual mask if it exists
         mask_manual = self.fetch_temp_mask('mask_manual')
         if mask_manual is not None:
             if expand_manual > 1:
                 mask_manual = scale_mask(mask_manual, factor=expand_manual)
-            mask_contaminant |= mask_manual 
+            mList.append(mask_manual)
+
+        if len(mList) == 0:
+            data = self.fetch_temp_image('data')
+            mask_contaminant = np.zeros_like(data)
+        else:
+            mask_contaminant = np.logical_or.reduce(mList)
         
         self.dump_temp_mask(mask_contaminant, name='mask_contaminant')
 
@@ -1347,9 +1373,16 @@ class Image(object):
             ax = axs[1]
             ax.imshow(mask_contaminant, origin='lower', cmap='Greys_r')
             ax.set_title('Contaminant mask', fontsize=18)
-            plot_mask_contours(mask_outer, ax=ax, verbose=verbose, color='C0', lw=0.5)
-            plot_mask_contours(mask_edge, ax=ax, verbose=verbose, color='C1', lw=0.5)
-            plot_mask_contours(mask_inner, ax=ax, verbose=verbose, color='C2', lw=0.5)
+
+            if mask_outer is not None:
+                plot_mask_contours(mask_outer, ax=ax, verbose=verbose, color='C0', lw=0.5)
+
+            if mask_edge is not None:
+                plot_mask_contours(mask_edge, ax=ax, verbose=verbose, color='C1', lw=0.5)
+
+            if mask_inner is not None:
+                plot_mask_contours(mask_inner, ax=ax, verbose=verbose, color='C2', lw=0.5)
+
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
 
@@ -1382,7 +1415,13 @@ class Image(object):
         [SGJY added]
         '''
         segment_edge = self.fetch_temp_segm('segment_edge')
-        assert segment_edge is not None, 'Please run detect_source_extended() first!'
+        #assert segment_edge is not None, 'Please run detect_source_extended() first!'
+
+        # Return None if the segment_edge is not available
+        if segment_edge is None:
+            if verbose:
+                print('The edge segmentation is not available!')
+            return None
 
         if expand_factor != 1:
             mask = scale_mask(segment_edge.data, factor=expand_factor)
@@ -1463,7 +1502,13 @@ class Image(object):
         [SGJY added]
         '''
         segment_inner = self.fetch_temp_segm('segment_inner')
-        assert segment_inner is not None, 'Please run detect_source_extended() first!'
+        #assert segment_inner is not None, 'Please run detect_source_extended() first!'
+
+        # Return None if the segment_inner is not available
+        if segment_inner is None:
+            if verbose:
+                print('The inner segmentation is not available!')
+            return None
 
         if expand_factor != 1:
             mask = scale_mask(segment_inner.data, factor=expand_factor)
@@ -1601,7 +1646,13 @@ class Image(object):
         [SGJY added]
         '''
         segment_outer = self.fetch_temp_segm('segment_outer')
-        assert segment_outer is not None, 'Please run detect_source_extended() first!'
+        #assert segment_outer is not None, 'Please run detect_source_extended() first!'
+
+        # Return None if the segment_outer is not available
+        if segment_outer is None:
+            if verbose:
+                print('The outer segmentation is not available!')
+            return None
 
         if expand_factor != 1:
             mask = scale_mask(segment_outer.data, factor=expand_factor)
@@ -3084,9 +3135,9 @@ class Image(object):
         #mask = getattr(self, mask_name).astype(int)
         mask = self.fetch_temp_mask(mask_name)
 
-        hduList = [fits.PrimaryHDU(header=self._header)]
-        hduList.append(fits.ImageHDU(mask.astype(int), header=self._wcs.to_header(),
-                                     name=mask_name))
+        hduList = [fits.PrimaryHDU(data=mask.astype(int), header=self._header)]
+        #hduList.append(fits.ImageHDU(mask.astype(int), header=self._wcs.to_header(),
+        #                             name=mask_name))
 
         hdul = fits.HDUList(hduList)
         hdul.writeto(filename, overwrite=overwrite)
