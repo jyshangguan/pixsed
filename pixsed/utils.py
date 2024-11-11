@@ -1059,7 +1059,7 @@ def gen_image_mask(image, threshold, npixels=5, mask=None, connectivity=8,
                                          plot=False)
 
     if choose_coord is None:
-        mask = smap.data
+        mask = smap.data > 0
 
     else:
         x, y = choose_coord
@@ -1933,7 +1933,7 @@ def scale_mask(mask, factor, connectivity=8):
     -----
     [SGJY added]
     '''
-    if np.sum(mask == 0):
+    if np.sum(mask) == 0:
         # Nothing to be scaled!!
         return mask
 
