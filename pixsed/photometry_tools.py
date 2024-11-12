@@ -468,7 +468,7 @@ class Image(object):
             if mask_coverage is None:
                 data = data.flatten()
             else:
-                data = data[mask_coverage]
+                data = data[~mask_coverage]
 
         elif mask_type == 'background':
             if mask_background is None:
@@ -547,15 +547,21 @@ class Image(object):
 
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=90, stretch='asinh', asinh_a=0.1)
+            
+            mask_coverage = self.fetch_temp_mask('mask_coverage')
+            if mask_coverage is not None:
+                norm = simple_norm(data[~mask_coverage], **norm_kwargs)
+                norm_sub = simple_norm(data_subbkg[~mask_coverage], **norm_kwargs)
+            else:
+                norm = simple_norm(data, **norm_kwargs)
+                norm_sub = simple_norm(data_subbkg, **norm_kwargs)
 
             ax = axs[0]
-            norm = simple_norm(data, **norm_kwargs)
             ax.imshow(data, cmap='Greys_r', origin='lower', norm=norm)
             ax.set_title('Original image', fontsize=16)
 
             ax = axs[1]
-            norm = simple_norm(data_subbkg, **norm_kwargs)
-            ax.imshow(data_subbkg, cmap='Greys_r', origin='lower', norm=norm)
+            ax.imshow(data_subbkg, cmap='Greys_r', origin='lower', norm=norm_sub)
             ax.set_title('Background subtracted', fontsize=16)
 
     def clean_temp_path(self):
@@ -1254,15 +1260,17 @@ class Image(object):
         '''
         assert self._bkg_median is not None, 'Please run background_properties() first to get _bkg_median!'
         assert self._bkg_std is not None, 'Please run background_properties() first to get _bkg_std!'
-
+        
+        data = self.fetch_temp_image('data')
         mask_coverage = self.fetch_temp_mask('mask_coverage')
+
         if mask_coverage is not None:
+            data = np.ma.masked_array(data, mask=mask_coverage)
             if mask is None:
                 mask = mask_coverage
             else:
                 mask |= mask_coverage
 
-        data = self.fetch_temp_image('data')
         img_sub = data - self._bkg_median
         mask, segm, _ = gen_image_mask(img_sub, threshold, npixels=npixels,
                                        mask=mask, connectivity=connectivity,
@@ -1751,7 +1759,11 @@ class Image(object):
 
             if norm_kwargs is None:
                 norm_kwargs = dict(percent=80, stretch='asinh', asinh_a=0.1)
-            norm = simple_norm(data, **norm_kwargs)
+            
+            if mask_coverage is None:
+                norm = simple_norm(data, **norm_kwargs)
+            else:
+                norm = simple_norm(data[~mask_coverage], **norm_kwargs)
 
             ax = axs[0]
             ax.imshow(data, cmap='Greys_r', origin='lower', norm=norm)
