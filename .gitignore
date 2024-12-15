@@ -172,3 +172,4 @@ templates/*.fits
 demo/temp/*
 demo/data/*
 demo/data/*_clean.fits
+develop/*
