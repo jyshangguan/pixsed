@@ -1580,6 +1580,7 @@ def image_photometry(image, aperture, calibration_uncertainty=None,
     else:
         return phot_bkgsub
 
+
 def multi_apertures_photometry(image, apertures, calibration_uncertainty=None,
                      mask=None, bkgsub=True, rannu_in=1.25, rannu_out=1.60,
                      error=True, nsample=300,
@@ -1675,6 +1676,7 @@ def multi_apertures_photometry(image, apertures, calibration_uncertainty=None,
         return phot_bkgsub, sigma
     else:
         return phot_bkgsub
+
 
 def error_curve_fit(area, noise, standard_area=1, plot=False):
     log_area = np.array([math.log10(i) for i in area])
@@ -2179,6 +2181,19 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None,
         ax.plot(tb_s['x'], tb_s['y'], ls='none', marker='o', ms=6,
                 mfc='none', mec='red', mew=0.2)
     return tb_s
+
+# FIXME: Bingcheng / Yilin/ Chao
+def SourcExtractor(image):
+    '''
+    '''
+    pass
+
+
+# FIXME: Bingcheng / Yilin/ Chao
+def SourcExtractor_HotCold(image):
+    '''
+    '''
+    pass
 
 
 def simplify_mask(mask, connectivity=8):
