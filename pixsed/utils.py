@@ -2183,14 +2183,14 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None,
     return tb_s
 
 # FIXME: Bingcheng / Yilin/ Chao
-def SourcExtractor(image):
+def SExtractor(image):
     '''
     '''
     pass
 
 
 # FIXME: Bingcheng / Yilin/ Chao
-def SourcExtractor_HotCold(image):
+def SExtractor_HotCold(image):
     '''
     '''
     pass
