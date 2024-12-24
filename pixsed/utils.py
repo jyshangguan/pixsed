@@ -2194,8 +2194,8 @@ def SExtractor(image, # Image data
                error=None, # Error image
                phot_apertures:int=5, phot_autoparams=[2.5, 3.5], phot_petroparams=[2.0, 3.5], mag_zeropoint:float=0.0, # Photometry parameters
                wcs=None, gain:float=0.0, pixel_scale:float=1.0, # image level parameters
-               nproc:int=1, # Number of processors
-               verbose:bool=False) -> SourceCatalog:
+               nproc:int=1, # Number of processors, which is only used in deblending
+               verbose:bool=False):
     '''
     Python equivilant to perform source detection following the SExtractor method.
     All parameters are named after the SExtractor parameters, except for new features added by Photutils.
@@ -2262,12 +2262,15 @@ def SExtractor(image, # Image data
 
     Returns
     -------
+    segment_img : SegmentationImage
+        The segmentation image.
     cat : SourceCatalog
         The source catalog with SExtractor parameters implemented.
     '''
+
     if back:
-        background = Background2D(image, (back_size, back_size), mask=mask, coverage_mask=coverage_mask, filter_size=(back_filtersize, back_filtersize), bkg_estimator=bkg_estimator)
-        image_bkgsub = image - background.background
+        background = Background2D(image, (back_size, back_size), mask=mask, coverage_mask=coverage_mask, filter_size=(back_filtersize, back_filtersize), bkg_estimator=bkg_estimator).background
+        image_bkgsub = image - background
     else:
         background = np.zeros_like(image)
         image_bkgsub = image
@@ -2278,7 +2281,7 @@ def SExtractor(image, # Image data
     del kernel
 
     # Calculate the threshold
-    threshold = detect_thresh * bkgrms_estimator(image, mask=mask)
+    threshold = detect_thresh * bkgrms_estimator(image[~mask].flatten())
 
     # Detect the sources using Photutils
     segment_img = detect_sources(data=image_convolved, threshold=threshold, npixels=detect_minarea, connectivity=detect_connectivity, mask=mask)
@@ -2289,8 +2292,9 @@ def SExtractor(image, # Image data
         print(f"  detect_minarea = {detect_minarea}")
         print(f"  nsigma = {detect_thresh}")
         print(f"  threshold  = {threshold}")
-        print(f"  rms estimator = {bkgrms_estimator.__name__}")
+        #print(f"  rms estimator = {bkgrms_estimator.__name__}")
         print(f'Found {segment_img.nlabels} sources.')
+        print('--'*20)
 
     del threshold
 
@@ -2307,6 +2311,7 @@ def SExtractor(image, # Image data
             print(f'Found {segment_img.nlabels} sources after deblending.')
         else:
             print('Deblending skipped.')
+        print('--'*20)
 
     # Clean spurious detection?
     if clean:
@@ -2319,15 +2324,16 @@ def SExtractor(image, # Image data
             print(f'Found {segment_img.nlabels} sources after cleaning.')
         else:
             print('Cleaning skipped.')
+        print('--'*20)
 
     cat = se_catalog(data=image_bkgsub, segment_img=segment_img, convolved_data=image_convolved, error=error, mask=mask, background=background, wcs=wcs, phot_autoparams=phot_autoparams, verbose=verbose, 
-                     phot_apertures=phot_apertures, phot_petroparams=phot_petroparams, mag_zeropoint=mag_zeropoint, wcs=wcs, gain=gain, pixel_scale=pixel_scale, # kwargs for se_catalog, may need to be implemented in the future
+                     phot_apertures=phot_apertures, phot_petroparams=phot_petroparams, mag_zeropoint=mag_zeropoint, gain=gain, pixel_scale=pixel_scale, # kwargs for se_catalog, may need to be implemented in the future
                     )
 
-    return cat
+    return segment_img, cat
 
 # FIXME:Chao
-def se_cleaning(segment_img, clean_param=1.0, *,) -> SegmentationImage:
+def se_cleaning(segment_img, clean_param=1.0,) -> SegmentationImage:
     '''
     Clean the segmentation image.
     '''
@@ -2419,7 +2425,8 @@ def se_catalog(data, segment_img,  *,
     cat : SourceCatalog
         The source catalog with SExtractor parameters implemented.
     '''
-    cat = SourceCatalog(data=data, segment_img=segment_img, convolved_data=convolved_data, error=error, mask=mask, background=background, wcs=wcs, kron_params=phot_autoparams, progress=verbose, **kwargs)
+
+    cat = SourceCatalog(data=data, segment_img=segment_img, convolved_data=convolved_data, error=error, mask=mask, background=background, wcs=wcs, kron_params=phot_autoparams, progress_bar=verbose)
 
     # since cat.covar_sigx2, cat.covar_sigy2, cat.covar_sigxy are lazy properties, it is okay to directly access them
     smaj_se = np.sqrt( 0.5 * (cat.covar_sigx2 + cat.covar_sigy2) + np.sqrt(0.25 * (cat.covar_sigx2 - cat.covar_sigy2)**2 + cat.covar_sigxy**2) )
