@@ -26,6 +26,8 @@ from scipy.ndimage import gaussian_filter
 from scipy.optimize import root_scalar, differential_evolution
 from scipy.interpolate import interp1d
 
+from photutils.background import Background2D
+from photutils.background.core import SExtractorBackground, StdBackgroundRMS
 from photutils.segmentation import make_2dgaussian_kernel, detect_sources, deblend_sources
 from photutils.segmentation import SourceFinder, SegmentationImage, SourceCatalog
 from photutils.morphology import data_properties
@@ -2183,8 +2185,151 @@ def select_segment_stars(image, segm, wcs, convolved_image=None, mask=None,
     return tb_s
 
 # FIXME: Bingcheng / Yilin/ Chao
-def SExtractor(image):
+def SExtractor(image, # Image data
+               detect_minarea:int=5, detect_thresh:float=1.5, detect_filtersize:int=3, detect_connectivity:{8,4}=8,# Detection parameters
+               deblend:bool=False, deblend_nthresh:float=32, deblend_mincont:float=0.005,  # Deblending parameters
+               clean:bool=False, clean_param:float=1.0, # Cleaning parameters
+               mask=None, coverage_mask=None, # Mask parameters
+               back:bool=False, back_size:int=64, back_filtersize:int=3, bkg_estimator=SExtractorBackground(sigma_clip=None), bkgrms_estimator=StdBackgroundRMS(sigma_clip=None), # Background parameters
+               error=None, # Error image
+               phot_apertures:int=5, phot_autoparams=[2.5, 3.5], phot_petroparams=[2.0, 3.5], mag_zeropoint:float=0.0, # Photometry parameters
+               wcs=None, gain:float=0.0, pixel_scale:float=1.0, # image level parameters
+               nproc:int=1, # Number of processors
+               verbose:bool=False) -> SourceCatalog:
     '''
+    Python equivilant to perform source detection following the SExtractor method.
+    All parameters are named after the SExtractor parameters, except for new features added by Photutils.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    detect_minarea : int (default: 5)
+        The minimum number of pixels required for an object.
+    detect_thresh : float (default: 1.5)
+        The threshold value for detection.
+    detect_filtersize : int (default: 3)
+        The filter size for detection.
+    detect_connectivity : {8, 4} (default: 8)
+        The type of pixel connectivity used in determining how pixels are
+        grouped into a detected source. The options are 4 or 8 (default).
+        4-connected pixels touch along their edges. 8-connected pixels touch
+        along their edges or corners.
+    deblend : bool (default: False)
+        Perform deblending if True.
+    deblend_nthresh : float (default: 32)
+        The number of thresholds used for object deblending.
+    deblend_mincont : float (default: 0.005)
+        The minimum contrast ratio used for object deblending.
+    clean : bool (default: False)
+        Perform cleaning if True.
+    clean_param : float (default: 1.0)
+        The cleaning parameter.
+    mask : 2D array (default: None)
+        The mask of all undesired pixels.
+    coverage_mask : 2D array (default: None)
+        The mask of the coverage.
+    back : bool (default: False)
+        Perform background subtraction if True.
+    back_size : int (default: 64)
+        The size of the background box.
+    back_filtersize : int (default: 3)
+        The filter size for background estimation.
+    bkg_estimator : BackgroundEstimator (default: SExtractorBackground(sigma_clip=None))
+        The background estimator.
+    bkgrms_estimator : BackgroundRMS (default: StdBackgroundRMS(sigma_clip=None))
+        The background rms estimator.
+    error : 2D array (default: None)
+        The error image.
+    phot_apertures : int (default: 5)
+        The number of apertures used for photometry.
+    phot_autoparams : list (default: [2.5, 3.5])
+        The parameters used for the AUTO photometry.
+    phot_petroparams : list (default: [2.0, 3.5])
+        The parameters used for the PETRO photometry.
+    mag_zeropoint : float (default: 0.0)
+        The magnitude zeropoint.
+    wcs : WCS (default: None)
+        The WCS of the image.
+    gain : float (default: 0.0)
+        The gain of the image.
+    pixel_scale : float (default: 1.0)
+        The pixel scale of the image.
+    nproc : int (default: 1)
+        The number of processors used.
+    verbose : bool (default: False)
+        Print the progress and show the progress bar if True.
+
+    Returns
+    -------
+    cat : SourceCatalog
+        The source catalog with SExtractor parameters implemented.
+    '''
+    if back:
+        background = Background2D(image, (back_size, back_size), mask=mask, coverage_mask=coverage_mask, filter_size=(back_filtersize, back_filtersize), bkg_estimator=bkg_estimator)
+        image_bkgsub = image - background.background
+    else:
+        background = np.zeros_like(image)
+        image_bkgsub = image
+
+    # Convolve the image
+    kernel = Gaussian2DKernel(detect_filtersize)
+    image_convolved = convolve_fft(image_bkgsub, kernel, mask=mask)
+    del kernel
+
+    # Calculate the threshold
+    threshold = detect_thresh * bkgrms_estimator(image, mask=mask)
+
+    # Detect the sources using Photutils
+    segment_img = detect_sources(data=image_convolved, threshold=threshold, npixels=detect_minarea, connectivity=detect_connectivity, mask=mask)
+    
+    if verbose:
+        print('SExtractor Detection Finished')
+        print(f"  kernel_size = {detect_filtersize}")
+        print(f"  detect_minarea = {detect_minarea}")
+        print(f"  nsigma = {detect_thresh}")
+        print(f"  threshold  = {threshold}")
+        print(f"  rms estimator = {bkgrms_estimator.__name__}")
+        print(f'Found {segment_img.nlabels} sources.')
+
+    del threshold
+
+    # Deblend?
+    if deblend:
+        segment_img = deblend_sources(data=image_bkgsub, segment_img=segment_img, npixels=detect_minarea, nlevels=deblend_nthresh, contrast=deblend_mincont, connectivity=detect_connectivity, nproc=nproc, progress_bar=verbose)
+
+    if verbose:
+        if deblend:
+            print('SExtractor Deblending Finished')
+            print(f"  deblend_nthresh = {deblend_nthresh}")
+            print(f"  deblend_mincont = {deblend_mincont}")
+            print(f"  deblend_connectivity = {detect_connectivity}")
+            print(f'Found {segment_img.nlabels} sources after deblending.')
+        else:
+            print('Deblending skipped.')
+
+    # Clean spurious detection?
+    if clean:
+        segment_img = se_cleaning(segment_img, clean_param=clean_param)
+
+    if verbose:
+        if clean:
+            print('SExtractor Cleaning Finished')
+            print(f"  clean_param = {clean_param}")
+            print(f'Found {segment_img.nlabels} sources after cleaning.')
+        else:
+            print('Cleaning skipped.')
+
+    cat = se_catalog(data=image_bkgsub, segment_img=segment_img, convolved_data=image_convolved, error=error, mask=mask, background=background, wcs=wcs, phot_autoparams=phot_autoparams, verbose=verbose, 
+                     phot_apertures=phot_apertures, phot_petroparams=phot_petroparams, mag_zeropoint=mag_zeropoint, wcs=wcs, gain=gain, pixel_scale=pixel_scale, # kwargs for se_catalog, may need to be implemented in the future
+                    )
+
+    return cat
+
+# FIXME:Chao
+def se_cleaning(segment_img, clean_param=1.0, *,) -> SegmentationImage:
+    '''
+    Clean the segmentation image.
     '''
     pass
 
@@ -2238,15 +2383,17 @@ def se_biweight_rms(image, mask=None, **kwargs):
         rms = biweight_scale(image[~mask].flatten(), **kwargs)
     return rms
     
-def se_catalog(image, segment_img,  *, 
+def se_catalog(data, segment_img,  *, 
                convolved_data=None, error=None, mask=None, 
+               background=None, wcs=None, phot_autoparams=[2.5, 3.5],
                verbose:bool=False, **kwargs) -> SourceCatalog:
     '''
     The user-defined Source catalog featuring SExtractor output parameters.
+    From here, we can add more measurements to the catalog.
 
     Parameters
     ----------
-    image : 2D array
+    data : 2D array
         The image data.
     segment_img : SegmentationImage
         The segmentation image.
@@ -2256,6 +2403,12 @@ def se_catalog(image, segment_img,  *,
         The error image data.
     mask : 2D array (boolean, default: None)
         The mask of the undesired pixels.
+    background : Background2D (default: None)
+        The background image.
+    wcs : WCS (default: None)
+        The WCS of the image.
+    phot_autoparams : list (default: [2.5, 3.5])
+        The parameters used for the AUTO photometry.
     verbose : bool (default: False)
         Print the progress if True.
     **kwargs : dict
@@ -2266,8 +2419,8 @@ def se_catalog(image, segment_img,  *,
     cat : SourceCatalog
         The source catalog with SExtractor parameters implemented.
     '''
+    cat = SourceCatalog(data=data, segment_img=segment_img, convolved_data=convolved_data, error=error, mask=mask, background=background, wcs=wcs, kron_params=phot_autoparams, progress=verbose, **kwargs)
 
-    cat = SourceCatalog(image, segment_img, convolved_data=convolved_data, error=error, mask=mask, **kwargs)
     # since cat.covar_sigx2, cat.covar_sigy2, cat.covar_sigxy are lazy properties, it is okay to directly access them
     smaj_se = np.sqrt( 0.5 * (cat.covar_sigx2 + cat.covar_sigy2) + np.sqrt(0.25 * (cat.covar_sigx2 - cat.covar_sigy2)**2 + cat.covar_sigxy**2) )
     smin_se = np.sqrt( 0.5 * (cat.covar_sigx2 + cat.covar_sigy2) - np.sqrt(0.25 * (cat.covar_sigx2 - cat.covar_sigy2)**2 + cat.covar_sigxy**2) )
@@ -2288,10 +2441,10 @@ def se_catalog(image, segment_img,  *,
 
 def se_detect_worker(image, nsigma, npixels, *, 
                       mask=None, background=None, bkgstd_func=se_biweight_rms, 
-                      kernel_smooth=Gaussian2DKernel(3), connectivity=8,
+                      back_filter_size=3, connectivity=8,
                       verbose:bool=False) -> SegmentationImage:
     '''
-    Source detection following the SExtractor method.
+    This worker uses SExtractor parameters to Photutils parameters and performs source detection.
 
     Parameters
     ----------
@@ -2307,10 +2460,8 @@ def se_detect_worker(image, nsigma, npixels, *,
         The background image. If None, the background will NOT be subtracted before source detection.
     bkgstd_func : function (default: se_biweight_rms)
         The function to calculate the background rms.
-    kernel_smooth : Any, optional
-        The kernel to smooth the image. Default is Gaussian2DKernel(3).
-        If None, the image will NOT be smoothed. 
-        If kernel_smooth is a scalar, it will be used as the standard deviation of the Gaussian kernel.
+    back_filter_size : int (default: 3)
+        The size of the filter to smooth the background. A 3x3 median filter is sufficient in most cases.
     connectivity : {4, 8} (default: 8)
         The type of pixel connectivity used in determining how pixels are
         grouped into a detected source. The options are 4 or 8 (default).
@@ -2367,18 +2518,6 @@ def se_detect_worker(image, nsigma, npixels, *,
 
     return SourceCatalog(seg_detect)
 
-def SExtractor(image, nsigma, npixels, *, 
-                mask=None, background=None, bkgstd_func=se_biweight_rms, 
-                kernel_smooth=Gaussian2DKernel(3), connectivity=8,
-                deblend=False, cleaning=False,
-                verbose:bool=False) -> SourceCatalog:
-    segment_img = se_detect_worker(image, nsigma=nsigma, npixels=npixels, mask=mask, background=background, bkgstd_func=bkgstd_func, kernel_smooth=kernel_smooth, connectivity=connectivity, verbose=verbose)
-    if deblend:
-        segment_img = deblend_sources(image, segment_img, npixels=npixels, connectivity=connectivity, mask=mask, nlevels=32, contrast=0.001)
-    if cleaning:
-        segment_img = clean_segmentation()
-
-    return se_catalog(image, segment_img,)
 # FIXME: Bingcheng / Yilin/ Chao
 def SExtractor_HotCold(image):
     '''
