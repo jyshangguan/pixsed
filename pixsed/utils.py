@@ -16,7 +16,7 @@ from astropy.visualization import AsinhStretch, SqrtStretch, LogStretch
 from astropy.visualization import PercentileInterval, simple_norm
 from astropy.visualization.mpl_normalize import ImageNormalize
 from astroquery.xmatch import XMatch
-from astropy.convolution import convolve
+from astropy.convolution import convolve, convolve_fft, Gaussian2DKernel
 from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.modeling import models, fitting
@@ -2188,7 +2188,197 @@ def SExtractor(image):
     '''
     pass
 
+def se_sigmaclip_rms(image, mask=None, nsigma=3, maxiters=5, **kwargs):
+    '''
+    Calculate the sigma-clipped rms of the image using astropy.stats.sigma_clipped_stats.
 
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    mask : 2D array (boolean, default: None)
+        The mask of the contaminants.
+    nsigma : float (default: 3)
+        The sigma of the clipping.
+    maxiters : int (default: 5)
+        The maximum number of iterations.
+    **kwargs : dict
+        Rest of keywords to be passed to astropy.stats.sigma_clipped_stats.
+
+    Returns
+    -------
+    rms : float
+    '''
+    _, _, rms = sigma_clipped_stats(image, mask=mask, sigma=nsigma, maxiters=maxiters, **kwargs)
+    return rms
+
+def se_biweight_rms(image, mask=None, **kwargs):
+    '''
+    Calculate the biweight rms of the image using astropy.stats.biweight_scale.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    mask : 2D array (boolean, default: None)
+        The mask of the contaminants.
+    **kwargs : dict
+        Rest of keywords to be passed to astropy.stats.biweight_scale.
+
+    Returns
+    -------
+    rms : float
+
+    '''
+    from astropy.stats import biweight_scale
+
+    if mask is None:
+        rms = biweight_scale(image.flatten(), **kwargs)
+    else:
+        rms = biweight_scale(image[~mask].flatten(), **kwargs)
+    return rms
+    
+def se_catalog(image, segment_img,  *, 
+               convolved_data=None, error=None, mask=None, 
+               verbose:bool=False, **kwargs) -> SourceCatalog:
+    '''
+    The user-defined Source catalog featuring SExtractor output parameters.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    segment_img : SegmentationImage
+        The segmentation image.
+    convolved_data : 2D array (default: None)
+        The convolved image data.
+    error : 2D array (default: None)
+        The error image data.
+    mask : 2D array (boolean, default: None)
+        The mask of the undesired pixels.
+    verbose : bool (default: False)
+        Print the progress if True.
+    **kwargs : dict
+        The rest of the keywords to be passed to SourceCatalog.
+
+    Returns
+    -------
+    cat : SourceCatalog
+        The source catalog with SExtractor parameters implemented.
+    '''
+
+    cat = SourceCatalog(image, segment_img, convolved_data=convolved_data, error=error, mask=mask, **kwargs)
+    # since cat.covar_sigx2, cat.covar_sigy2, cat.covar_sigxy are lazy properties, it is okay to directly access them
+    smaj_se = np.sqrt( 0.5 * (cat.covar_sigx2 + cat.covar_sigy2) + np.sqrt(0.25 * (cat.covar_sigx2 - cat.covar_sigy2)**2 + cat.covar_sigxy**2) )
+    smin_se = np.sqrt( 0.5 * (cat.covar_sigx2 + cat.covar_sigy2) - np.sqrt(0.25 * (cat.covar_sigx2 - cat.covar_sigy2)**2 + cat.covar_sigxy**2) )
+    orientation_se_rad = 0.5 * np.arctan2(2 * cat.covar_sigxy, cat.covar_sigx2 - cat.covar_sigy2)
+    orientation_se = np.degrees(orientation_se_rad.value) * units.deg
+
+    elongation_se = smaj_se / smin_se
+    ellipticity_se = 1 - smin_se / smaj_se
+    cat.add_extra_property('semimajor_sigma_se', smaj_se)
+    cat.add_extra_property('semiminor_sigma_se', smin_se)
+    cat.add_extra_property('orientation_se', orientation_se)
+    cat.add_extra_property('elongation_se', elongation_se)
+    cat.add_extra_property('ellipticity_se', ellipticity_se)
+    if verbose:
+        print(f'Successfully add {len(cat.extra_properties)} extra properties to the source catalog:', cat.extra_properties)
+
+    return cat
+
+def se_detect_worker(image, nsigma, npixels, *, 
+                      mask=None, background=None, bkgstd_func=se_biweight_rms, 
+                      kernel_smooth=Gaussian2DKernel(3), connectivity=8,
+                      verbose:bool=False) -> SegmentationImage:
+    '''
+    Source detection following the SExtractor method.
+
+    Parameters
+    ----------
+    image : 2D array
+        The image data to be detected.
+    nsigma : float (default: 3)
+        The factor of the background rms to be the threshold.
+    npixels : int (default: 5)
+        The number of connected pixels to be considered as a source.
+    mask : 2D array (boolean, default: None)
+        The mask for undesired pixels.
+    background : 2D array (default: None)
+        The background image. If None, the background will NOT be subtracted before source detection.
+    bkgstd_func : function (default: se_biweight_rms)
+        The function to calculate the background rms.
+    kernel_smooth : Any, optional
+        The kernel to smooth the image. Default is Gaussian2DKernel(3).
+        If None, the image will NOT be smoothed. 
+        If kernel_smooth is a scalar, it will be used as the standard deviation of the Gaussian kernel.
+    connectivity : {4, 8} (default: 8)
+        The type of pixel connectivity used in determining how pixels are
+        grouped into a detected source. The options are 4 or 8 (default).
+        4-connected pixels touch along their edges. 8-connected pixels touch
+        along their edges or corners
+    verbose : bool (default: True)
+        Print the progress if True.
+
+    Returns
+    -------
+    seg_detect : SegmentationImage
+        The SegmentationImage of the detected sources (without deblending).
+    '''
+    
+    # Subtract the background if provided
+    if background is not None:
+        image_bkgsub = image - background
+    else:
+        image_bkgsub = image
+    # Smooth the image if the kernel is provided
+    kernel = Gaussian2DKernel(3)
+    if kernel_smooth is None:
+        image_convolved = image_bkgsub # No smoothing will be applied
+        kernel._model.x_stddev = None
+    else:
+        if np.isscalar(kernel_smooth):
+            kernel = Gaussian2DKernel(kernel_smooth) # Use the kernel_smooth as the standard deviation of the Gaussian kernel
+        else:
+            kernel = kernel_smooth
+        image_convolved = convolve_fft(image_bkgsub, kernel, mask=mask)
+
+    # Calculate the background rms
+    bkg_std = bkgstd_func(image_bkgsub, mask=mask)
+    threshold = nsigma * bkg_std
+
+    # Detect the sources using Photutils
+    seg_detect = detect_sources(image_convolved, threshold=threshold, 
+                                connectivity=connectivity, npixels=npixels, 
+                                mask=mask)
+    if verbose:
+        print('SExtractor Worker Finished')
+        print(f"  kernel_size = {kernel._model.x_stddev}")
+        print(f"  npixels = {npixels}")
+        print(f"  nsigma = {nsigma}")
+        print(f"  threshold  = {threshold}")
+        print(f"  rms of image  = {bkg_std} ({bkgstd_func.__name__})")
+        print(f'Found {seg_detect.nlabels} sources.')
+
+    del image_bkgsub
+    del kernel
+    del image_convolved
+    del bkg_std
+    del threshold
+
+    return SourceCatalog(seg_detect)
+
+def SExtractor(image, nsigma, npixels, *, 
+                mask=None, background=None, bkgstd_func=se_biweight_rms, 
+                kernel_smooth=Gaussian2DKernel(3), connectivity=8,
+                deblend=False, cleaning=False,
+                verbose:bool=False) -> SourceCatalog:
+    segment_img = se_detect_worker(image, nsigma=nsigma, npixels=npixels, mask=mask, background=background, bkgstd_func=bkgstd_func, kernel_smooth=kernel_smooth, connectivity=connectivity, verbose=verbose)
+    if deblend:
+        segment_img = deblend_sources(image, segment_img, npixels=npixels, connectivity=connectivity, mask=mask, nlevels=32, contrast=0.001)
+    if cleaning:
+        segment_img = clean_segmentation()
+
+    return se_catalog(image, segment_img,)
 # FIXME: Bingcheng / Yilin/ Chao
 def SExtractor_HotCold(image):
     '''
