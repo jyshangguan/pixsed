@@ -2190,7 +2190,7 @@ def SExtractor(image, # Image data
                deblend:bool=False, deblend_nthresh:float=32, deblend_mincont:float=0.005,  # Deblending parameters
                clean:bool=False, clean_param:float=1.0, # Cleaning parameters
                mask=None, coverage_mask=None, # Mask parameters
-               back:bool=False, back_size:int=64, back_filtersize:int=3, bkg_estimator=SExtractorBackground(sigma_clip=None), bkgrms_estimator=StdBackgroundRMS(sigma_clip=None), # Background parameters
+               back:bool=False, back_size:int=64, back_filtersize:int=3, bkg_estimator=SExtractorBackground(), bkgrms_estimator=StdBackgroundRMS(), # Background parameters
                error=None, # Error image
                phot_apertures:int=5, phot_autoparams=[2.5, 3.5], phot_petroparams=[2.0, 3.5], mag_zeropoint:float=0.0, # Photometry parameters
                wcs=None, gain:float=0.0, pixel_scale:float=1.0, # image level parameters
@@ -2275,15 +2275,18 @@ def SExtractor(image, # Image data
         background = np.zeros_like(image)
         image_bkgsub = image
 
-    # Convolve the image
+    # Convolve the image with a Gaussian kernel of size (detect_filtersize, detect_filtersize)
     kernel = Gaussian2DKernel(detect_filtersize)
     image_convolved = convolve_fft(image_bkgsub, kernel, mask=mask)
     del kernel
 
     # Calculate the threshold
-    threshold = detect_thresh * bkgrms_estimator(image[~mask].flatten())
+    if mask is not None:
+        threshold = detect_thresh * bkgrms_estimator(image[~mask].flatten())
+    else:
+        threshold = detect_thresh * bkgrms_estimator(image.flatten())
 
-    # Detect the sources using Photutils
+    # Detect the sources using Photutils.segmentation.detect_sources
     segment_img = detect_sources(data=image_convolved, threshold=threshold, npixels=detect_minarea, connectivity=detect_connectivity, mask=mask)
     
     if verbose:
@@ -2298,7 +2301,7 @@ def SExtractor(image, # Image data
 
     del threshold
 
-    # Deblend?
+    # Deblend the sources using Photutils.segmentation.deblend_sources if required
     if deblend:
         segment_img = deblend_sources(data=image_bkgsub, segment_img=segment_img, npixels=detect_minarea, nlevels=deblend_nthresh, contrast=deblend_mincont, connectivity=detect_connectivity, nproc=nproc, progress_bar=verbose)
 
@@ -2326,42 +2329,20 @@ def SExtractor(image, # Image data
             print('Cleaning skipped.')
         print('--'*20)
 
+    # Create the SExtractor source catalog based on Photutils.segmentation.SourceCatalog
     cat = se_catalog(data=image_bkgsub, segment_img=segment_img, convolved_data=image_convolved, error=error, mask=mask, background=background, wcs=wcs, phot_autoparams=phot_autoparams, verbose=verbose, 
                      phot_apertures=phot_apertures, phot_petroparams=phot_petroparams, mag_zeropoint=mag_zeropoint, gain=gain, pixel_scale=pixel_scale, # kwargs for se_catalog, may need to be implemented in the future
                     )
 
+    # return segmentation image even though it is accessible from the catalog via cat._segment_img
     return segment_img, cat
 
-# FIXME:Chao
+# FIXME: Chao
 def se_cleaning(segment_img, clean_param=1.0,) -> SegmentationImage:
     '''
     Clean the segmentation image.
     '''
     pass
-
-def se_sigmaclip_rms(image, mask=None, nsigma=3, maxiters=5, **kwargs):
-    '''
-    Calculate the sigma-clipped rms of the image using astropy.stats.sigma_clipped_stats.
-
-    Parameters
-    ----------
-    image : 2D array
-        The image data.
-    mask : 2D array (boolean, default: None)
-        The mask of the contaminants.
-    nsigma : float (default: 3)
-        The sigma of the clipping.
-    maxiters : int (default: 5)
-        The maximum number of iterations.
-    **kwargs : dict
-        Rest of keywords to be passed to astropy.stats.sigma_clipped_stats.
-
-    Returns
-    -------
-    rms : float
-    '''
-    _, _, rms = sigma_clipped_stats(image, mask=mask, sigma=nsigma, maxiters=maxiters, **kwargs)
-    return rms
 
 def se_biweight_rms(image, mask=None, **kwargs):
     '''
@@ -2446,91 +2427,174 @@ def se_catalog(data, segment_img,  *,
 
     return cat
 
-def se_detect_worker(image, nsigma, npixels, *, 
-                      mask=None, background=None, bkgstd_func=se_biweight_rms, 
-                      back_filter_size=3, connectivity=8,
-                      verbose:bool=False) -> SegmentationImage:
+def se_sigmaclip_rms(image, mask=None, nsigma=3, maxiters=5, **kwargs):
     '''
-    This worker uses SExtractor parameters to Photutils parameters and performs source detection.
+    Calculate the sigma-clipped rms of the image using astropy.stats.sigma_clipped_stats.
 
     Parameters
     ----------
     image : 2D array
-        The image data to be detected.
-    nsigma : float (default: 3)
-        The factor of the background rms to be the threshold.
-    npixels : int (default: 5)
-        The number of connected pixels to be considered as a source.
+        The image data.
     mask : 2D array (boolean, default: None)
-        The mask for undesired pixels.
-    background : 2D array (default: None)
-        The background image. If None, the background will NOT be subtracted before source detection.
-    bkgstd_func : function (default: se_biweight_rms)
-        The function to calculate the background rms.
-    back_filter_size : int (default: 3)
-        The size of the filter to smooth the background. A 3x3 median filter is sufficient in most cases.
-    connectivity : {4, 8} (default: 8)
-        The type of pixel connectivity used in determining how pixels are
-        grouped into a detected source. The options are 4 or 8 (default).
-        4-connected pixels touch along their edges. 8-connected pixels touch
-        along their edges or corners
-    verbose : bool (default: True)
-        Print the progress if True.
+        The mask of the contaminants.
+    nsigma : float (default: 3)
+        The sigma of the clipping.
+    maxiters : int (default: 5)
+        The maximum number of iterations.
+    **kwargs : dict
+        Rest of keywords to be passed to astropy.stats.sigma_clipped_stats.
 
     Returns
     -------
-    seg_detect : SegmentationImage
-        The SegmentationImage of the detected sources (without deblending).
+    rms : float
     '''
-    
-    # Subtract the background if provided
-    if background is not None:
-        image_bkgsub = image - background
-    else:
-        image_bkgsub = image
-    # Smooth the image if the kernel is provided
-    kernel = Gaussian2DKernel(3)
-    if kernel_smooth is None:
-        image_convolved = image_bkgsub # No smoothing will be applied
-        kernel._model.x_stddev = None
-    else:
-        if np.isscalar(kernel_smooth):
-            kernel = Gaussian2DKernel(kernel_smooth) # Use the kernel_smooth as the standard deviation of the Gaussian kernel
-        else:
-            kernel = kernel_smooth
-        image_convolved = convolve_fft(image_bkgsub, kernel, mask=mask)
-
-    # Calculate the background rms
-    bkg_std = bkgstd_func(image_bkgsub, mask=mask)
-    threshold = nsigma * bkg_std
-
-    # Detect the sources using Photutils
-    seg_detect = detect_sources(image_convolved, threshold=threshold, 
-                                connectivity=connectivity, npixels=npixels, 
-                                mask=mask)
-    if verbose:
-        print('SExtractor Worker Finished')
-        print(f"  kernel_size = {kernel._model.x_stddev}")
-        print(f"  npixels = {npixels}")
-        print(f"  nsigma = {nsigma}")
-        print(f"  threshold  = {threshold}")
-        print(f"  rms of image  = {bkg_std} ({bkgstd_func.__name__})")
-        print(f'Found {seg_detect.nlabels} sources.')
-
-    del image_bkgsub
-    del kernel
-    del image_convolved
-    del bkg_std
-    del threshold
-
-    return SourceCatalog(seg_detect)
+    _, _, rms = sigma_clipped_stats(image, mask=mask, sigma=nsigma, maxiters=maxiters, **kwargs)
+    return rms
 
 # FIXME: Bingcheng / Yilin/ Chao
-def SExtractor_HotCold(image):
+def SExtractor_HDR(image,
+                detect_minarea:tuple[int]=(5, 5), detect_thresh:tuple[float]=(3, 2), detect_filtersize:tuple[int]=(3,3), detect_connectivity:tuple[{8,4}]=(8,8), # Detection parameters
+                deblend:tuple[bool]=(False, False), deblend_nthresh:tuple[float]=(32, 32), deblend_mincont:tuple[float]=(0.002, 0.005),  # Deblending parameters
+                clean:tuple[bool]=(False, False), clean_param:tuple[float]=(1.0, 1.0), # Cleaning parameters
+                mask=None, coverage_mask=None, # Mask parameters
+                back:tuple[bool]=(False, False), back_size:tuple[int]=(128, 64), back_filtersize:tuple[int]=(9, 3), bkg_estimator=SExtractorBackground(), bkgrms_estimator=StdBackgroundRMS(), # Background parameters
+                verbose:bool=False,
+                **kwargs):
     '''
-    '''
-    pass
+    HDR SExtraction following "GALAPAGOS: from pixels to parameters" (Barden et al. 2012)
+    All parameters listed below are tuples, with the first element for the cold detection and the second element for the hot detection.
 
+    Parameters
+    ----------
+    image : 2D array
+        The image data.
+    detect_minarea : tuple[int] (default: (5, 5))
+        The minimum number of pixels required for an object.
+    detect_thresh : tuple[float] (default: (3, 2))
+        The threshold value for detection.
+    detect_filtersize : tuple[int] (default: (3,3))
+        The filter size for detection.
+    detect_connectivity : tuple[{8,4}] (default: (8,8))
+        The type of pixel connectivity used in determining how pixels are
+        grouped into a detected source. The options are 4 or 8 (default).
+        4-connected pixels touch along their edges. 8-connected pixels touch
+        along their edges or corners.
+    deblend : tuple[bool] (default: (False, False))
+        Perform deblending if True.
+    deblend_nthresh : tuple[float] (default: (32, 32))
+        The number of thresholds used for object deblending.
+    deblend_mincont : tuple[float] (default: (0.002, 0.005))
+        The minimum contrast ratio used for object deblending.
+    clean : tuple[bool] (default: (False, False))
+        Perform cleaning if True.
+    clean_param : tuple[float] (default: (1.0, 1.0))
+        The cleaning parameter.
+    back : tuple[bool] (default: (False, False))
+        Perform background subtraction if True.
+    back_size : tuple[int] (default: (128, 64))
+        The size of the background box.
+    back_filtersize : tuple[int] (default: (9, 3))
+        The filter size for background estimation.
+    **kwargs : dict
+        The shared keyword arguments to be passed to SExtractor.
+
+    Returns
+    -------
+    segm_comb : SegmentationImage
+        The combined segmentation image.
+    cat : SourceCatalog
+        The source catalog with SExtractor parameters implemented.
+    '''
+    print('Cold Detection')
+    _, cat_cold = SExtractor(image, 
+                            detect_minarea=detect_minarea[0], detect_thresh=detect_thresh[0], detect_filtersize=detect_filtersize[0], detect_connectivity=detect_connectivity[0],
+                            deblend=deblend[0], deblend_nthresh=deblend_nthresh[0], deblend_mincont=deblend_mincont[0],
+                            clean=clean[0], clean_param=clean_param[0],
+                            mask=mask, coverage_mask=coverage_mask,
+                            back=back[0], back_size=back_size[0], back_filtersize=back_filtersize[0], bkg_estimator=bkg_estimator, bkgrms_estimator=bkgrms_estimator,
+                            verbose=verbose,
+                            **kwargs)
+    print('Hot Detection')
+    _, cat_hot = SExtractor(image,
+                            detect_minarea=detect_minarea[1], detect_thresh=detect_thresh[1], detect_filtersize=detect_filtersize[1], detect_connectivity=detect_connectivity[1],
+                            deblend=deblend[1], deblend_nthresh=deblend_nthresh[1], deblend_mincont=deblend_mincont[1],
+                            clean=clean[1], clean_param=clean_param[1],
+                            mask=mask, coverage_mask=coverage_mask,
+                            back=back[1], back_size=back_size[1], back_filtersize=back_filtersize[1], bkg_estimator=bkg_estimator, bkgrms_estimator=bkgrms_estimator,
+                            verbose=verbose,
+                            **kwargs)
+                                     
+    print('HDR Combination')
+    segm_comb = se_hdrcombine(cat_cold, cat_hot, verbose=verbose)
+
+    # A Caveat:
+    # prior to make a combined catalog, I need to get a background-subtracted image
+    # However, cold/hot detection may have different background
+    # I simply use the cold background for the combined catalog
+    if back:
+        background = Background2D(image, (back_size[0], back_size[0]), mask=mask, coverage_mask=coverage_mask, filter_size=(back_filtersize[0], back_filtersize[0]), bkg_estimator=bkg_estimator).background
+        image_bkgsub = image - background
+    else:
+        background = np.zeros_like(image)
+        image_bkgsub = image
+    cat = se_catalog(data=image_bkgsub, segment_img=segm_comb, convolved_data=cat_cold._convolved_data,
+                     mask=mask, background=background,
+                     **kwargs)
+
+    return segm_comb, cat
+
+def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5]):
+    '''
+    Make a mask for the Kron apertures.
+    
+    Parameters
+    ----------
+    cat : SourceCatalog
+        The source catalog.
+    kron_params : list (default: [2.5, 3.5])
+        The parameters used for the AUTO photometry.
+
+    Returns
+    -------
+    kronmask : 2D boolean array
+    '''
+    kronaper_list = cat.make_kron_apertures(kron_params=kron_params) # expand the Kron apertures from 2.5 to 5
+    kronmask = np.zeros_like(cat._data, dtype=bool)
+    for aper_iter in kronaper_list:
+        bbox_iter = aper_iter.to_mask().bbox
+        kronmask[bbox_iter.iymin:bbox_iter.iymax, bbox_iter.ixmin:bbox_iter.ixmax] |= (aper_iter.to_mask().data>0).astype(bool)
+
+    del kronaper_list
+
+    return kronmask
+
+# FIXME: Bingcheng / Chao
+def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog, verbose:bool=False) -> SegmentationImage:
+    '''
+    Combine the cold and hot segmentation images.
+    '''
+
+    kronmask = se_make_kronmask(cat_cold)
+    xhot, yhot = cat_hot.xcentroid, cat_hot.ycentroid
+
+    from scipy.ndimage import map_coordinates
+    map_hot_to_kronmask = map_coordinates(kronmask, [xhot, yhot], order=1, mode='nearest')
+    segm_hot_survived = cat_hot._segment_img.copy()
+    segm_hot_survived.remove_labels(cat_hot.labels[(map_hot_to_kronmask>0)])
+    segm_hot_survived.relabel_consecutive(start_label=cat_cold._segment_img.nlabels+1)
+    if verbose:
+        print(f'{len(cat_hot.labels[(map_hot_to_kronmask>0)])} out of {len(cat_hot.labels)} hot sources are removed while combining')
+
+    segm_combine_data = cat_cold._segment_img.data + segm_hot_survived.data
+    
+    segm_combine = SegmentationImage(segm_combine_data)
+
+    del kronmask
+    del xhot, yhot
+    del map_hot_to_kronmask
+    del segm_hot_survived
+
+    return segm_combine
 
 def simplify_mask(mask, connectivity=8):
     '''
