@@ -22,9 +22,10 @@ from astropy.table import Table
 from astropy.modeling import models, fitting
 from astropy.nddata import Cutout2D
 from astropy.utils.exceptions import AstropyUserWarning
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, map_coordinates
 from scipy.optimize import root_scalar, differential_evolution
 from scipy.interpolate import interp1d
+
 
 from photutils.background import Background2D
 from photutils.background.core import SExtractorBackground, StdBackgroundRMS
@@ -2424,6 +2425,7 @@ def se_catalog(data, segment_img,  *,
     cat.add_extra_property('ellipticity_se', ellipticity_se)
     if verbose:
         print(f'Successfully add {len(cat.extra_properties)} extra properties to the source catalog:', cat.extra_properties)
+        print('--'*20)
 
     return cat
 
@@ -2457,7 +2459,8 @@ def SExtractor_HDR(image,
                 deblend:tuple[bool]=(False, False), deblend_nthresh:tuple[float]=(32, 32), deblend_mincont:tuple[float]=(0.002, 0.005),  # Deblending parameters
                 clean:tuple[bool]=(False, False), clean_param:tuple[float]=(1.0, 1.0), # Cleaning parameters
                 mask=None, coverage_mask=None, # Mask parameters
-                back:tuple[bool]=(False, False), back_size:tuple[int]=(128, 64), back_filtersize:tuple[int]=(9, 3), bkg_estimator=SExtractorBackground(), bkgrms_estimator=StdBackgroundRMS(), # Background parameters
+                back:tuple[bool]=(False, False), back_size:tuple[int]=(128, 32), back_filtersize:tuple[int]=(3, 3), bkg_estimator=SExtractorBackground(), bkgrms_estimator=StdBackgroundRMS(), # Background parameters
+                scale_kron:float=1.1, phot_autoparams:list=[2.5, 1.4],
                 verbose:bool=False,
                 **kwargs):
     '''
@@ -2491,10 +2494,12 @@ def SExtractor_HDR(image,
         The cleaning parameter.
     back : tuple[bool] (default: (False, False))
         Perform background subtraction if True.
-    back_size : tuple[int] (default: (128, 64))
+    back_size : tuple[int] (default: (128, 32))
         The size of the background box.
-    back_filtersize : tuple[int] (default: (9, 3))
+    back_filtersize : tuple[int] (default: (3, 3))
         The filter size for background estimation.
+    verbose : bool (default: False)
+        Print the progress and show the progress bar if True.
     **kwargs : dict
         The shared keyword arguments to be passed to SExtractor.
 
@@ -2525,7 +2530,7 @@ def SExtractor_HDR(image,
                             **kwargs)
                                      
     print('HDR Combination')
-    segm_comb = se_hdrcombine(cat_cold, cat_hot, verbose=verbose)
+    segm_comb = se_hdrcombine(cat_cold, cat_hot, scale_kron=scale_kron, kron_params=phot_autoparams, verbose=verbose)
 
     # A Caveat:
     # prior to make a combined catalog, I need to get a background-subtracted image
@@ -2540,6 +2545,11 @@ def SExtractor_HDR(image,
     cat = se_catalog(data=image_bkgsub, segment_img=segm_comb, convolved_data=cat_cold._convolved_data,
                      mask=mask, background=background,
                      **kwargs)
+    
+    if verbose:
+        print('HDR SExtractor Finished')
+        print(f'Found {segm_comb.nlabels} sources after HDR SExtractor.')
+        print('--'*20)
 
     return segm_comb, cat
 
@@ -2569,23 +2579,27 @@ def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5]):
     return kronmask
 
 # FIXME: Bingcheng / Chao
-def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog, verbose:bool=False) -> SegmentationImage:
+def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog,
+                    kron_params=[2.5, 1.4],
+                    scale_kron:float=1.1,
+                    verbose:bool=False) -> SegmentationImage:
     '''
     Combine the cold and hot segmentation images.
     '''
 
-    kronmask = se_make_kronmask(cat_cold)
+    kronmask = se_make_kronmask(cat_cold, kron_params=[kron_params[0]*scale_kron, kron_params[1]*scale_kron])
     xhot, yhot = cat_hot.xcentroid, cat_hot.ycentroid
 
-    from scipy.ndimage import map_coordinates
-    map_hot_to_kronmask = map_coordinates(kronmask, [xhot, yhot], order=1, mode='nearest')
+    map_hot_to_kronmask = map_coordinates(kronmask, [yhot, xhot], order=1, mode='nearest')
     segm_hot_survived = cat_hot._segment_img.copy()
     segm_hot_survived.remove_labels(cat_hot.labels[(map_hot_to_kronmask>0)])
     segm_hot_survived.relabel_consecutive(start_label=cat_cold._segment_img.nlabels+1)
     if verbose:
-        print(f'{len(cat_hot.labels[(map_hot_to_kronmask>0)])} out of {len(cat_hot.labels)} hot sources are removed while combining')
+        print(f'{(map_hot_to_kronmask>0).sum()} out of {len(cat_hot.labels)} hot sources are removed while combining')
 
-    segm_combine_data = cat_cold._segment_img.data + segm_hot_survived.data
+    mask_overlap = (cat_cold._segment_img.make_source_mask() & segm_hot_survived.make_source_mask()).astype(bool)
+    print(f'{np.sum(mask_overlap)} pixels are overlapped between cold and hot detections')
+    segm_combine_data = cat_cold._segment_img.data* (~mask_overlap).astype(int) + segm_hot_survived.data
     
     segm_combine = SegmentationImage(segm_combine_data)
 
@@ -2593,6 +2607,7 @@ def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog, verbose:bool=Fa
     del xhot, yhot
     del map_hot_to_kronmask
     del segm_hot_survived
+    del mask_overlap
 
     return segm_combine
 
