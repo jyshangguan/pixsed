@@ -2581,21 +2581,21 @@ def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5]):
 # FIXME: Bingcheng / Chao
 def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog,
                     kron_params=[2.5, 1.4],
-                    scale_kron:float=1.1,
+                    scale_factor:float=1.1,
                     verbose:bool=False) -> SegmentationImage:
     '''
     Combine the cold and hot segmentation images.
     '''
 
-    kronmask = se_make_kronmask(cat_cold, kron_params=[kron_params[0]*scale_kron, kron_params[1]*scale_kron])
+    kronmask = se_make_kronmask(cat_cold, kron_params=[kron_params[0]*scale_factor, kron_params[1]*scale_factor])
     xhot, yhot = cat_hot.xcentroid, cat_hot.ycentroid
 
-    map_hot_to_kronmask = map_coordinates(kronmask, [yhot, xhot], order=1, mode='nearest')
+    map_hot_to_kronmask = map_coordinates(kronmask.astype(int), [yhot, xhot], order=3, mode='nearest')
     segm_hot_survived = cat_hot._segment_img.copy()
-    segm_hot_survived.remove_labels(cat_hot.labels[(map_hot_to_kronmask>0)])
+    segm_hot_survived.remove_labels(cat_hot.labels[map_hot_to_kronmask.astype(bool)])
     segm_hot_survived.relabel_consecutive(start_label=cat_cold._segment_img.nlabels+1)
     if verbose:
-        print(f'{(map_hot_to_kronmask>0).sum()} out of {len(cat_hot.labels)} hot sources are removed while combining')
+        print(f'{(map_hot_to_kronmask.astype(bool)).sum()} out of {len(cat_hot.labels)} hot sources are removed while combining')
 
     mask_overlap = (cat_cold._segment_img.make_source_mask() & segm_hot_survived.make_source_mask()).astype(bool)
     print(f'{np.sum(mask_overlap)} pixels are overlapped between cold and hot detections')
