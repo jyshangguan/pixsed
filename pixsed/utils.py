@@ -2460,7 +2460,7 @@ def SExtractor_HDR(image,
                 clean:tuple[bool]=(False, False), clean_param:tuple[float]=(1.0, 1.0), # Cleaning parameters
                 mask=None, coverage_mask=None, # Mask parameters
                 back:tuple[bool]=(False, False), back_size:tuple[int]=(128, 32), back_filtersize:tuple[int]=(3, 3), bkg_estimator=SExtractorBackground(), bkgrms_estimator=StdBackgroundRMS(), # Background parameters
-                scale_kron:float=1.1, phot_autoparams:list=[2.5, 1.4],
+                scale_factor:float=1.1, phot_autoparams:list=[2.5, 1.4],
                 verbose:bool=False,
                 **kwargs):
     '''
@@ -2498,6 +2498,8 @@ def SExtractor_HDR(image,
         The size of the background box.
     back_filtersize : tuple[int] (default: (3, 3))
         The filter size for background estimation.
+    scale_factor : float (default: 1.1)
+        The scaling factor for expanding/shrinking the Kron apertures.
     verbose : bool (default: False)
         Print the progress and show the progress bar if True.
     **kwargs : dict
@@ -2530,7 +2532,7 @@ def SExtractor_HDR(image,
                             **kwargs)
                                      
     print('HDR Combination')
-    segm_comb = se_hdrcombine(cat_cold, cat_hot, scale_kron=scale_kron, kron_params=phot_autoparams, verbose=verbose)
+    segm_comb = se_hdrcombine(cat_cold, cat_hot, scale_factor=scale_factor, kron_params=phot_autoparams, verbose=verbose)
 
     # A Caveat:
     # prior to make a combined catalog, I need to get a background-subtracted image
@@ -2553,7 +2555,7 @@ def SExtractor_HDR(image,
 
     return segm_comb, cat
 
-def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5]):
+def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5], pad=50):
     '''
     Make a mask for the Kron apertures.
     
@@ -2563,20 +2565,22 @@ def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5]):
         The source catalog.
     kron_params : list (default: [2.5, 3.5])
         The parameters used for the AUTO photometry.
+    pad : int (default: 50)
+        Padding pixel number for the mask in case the Kron apertures are too close to the edge.
 
     Returns
     -------
     kronmask : 2D boolean array
     '''
     kronaper_list = cat.make_kron_apertures(kron_params=kron_params) # expand the Kron apertures from 2.5 to 5
-    kronmask = np.zeros_like(cat._data, dtype=bool)
+    kronmask = np.zeros(cat._data.shape+2*pad, dtype=bool)
     for aper_iter in kronaper_list:
         bbox_iter = aper_iter.to_mask().bbox
         kronmask[bbox_iter.iymin:bbox_iter.iymax, bbox_iter.ixmin:bbox_iter.ixmax] |= (aper_iter.to_mask().data>0).astype(bool)
 
     del kronaper_list
 
-    return kronmask
+    return kronmask[pad:-pad, pad:-pad]
 
 # FIXME: Bingcheng / Chao
 def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog,
