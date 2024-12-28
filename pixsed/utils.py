@@ -2573,12 +2573,14 @@ def se_make_kronmask(cat:SourceCatalog, kron_params=[2.5, 3.5], pad=50):
     kronmask : 2D boolean array
     '''
     kronaper_list = cat.make_kron_apertures(kron_params=kron_params) # expand the Kron apertures from 2.5 to 5
-    kronmask = np.zeros(cat._data.shape+2*pad, dtype=bool)
+    shape_data = cat._data.shape
+    kronmask = np.zeros((shape_data[0]+2*pad, shape_data[1]+2*pad), dtype=bool)
     for aper_iter in kronaper_list:
         bbox_iter = aper_iter.to_mask().bbox
         kronmask[bbox_iter.iymin:bbox_iter.iymax, bbox_iter.ixmin:bbox_iter.ixmax] |= (aper_iter.to_mask().data>0).astype(bool)
 
     del kronaper_list
+    del shape_data
 
     return kronmask[pad:-pad, pad:-pad]
 
@@ -2589,6 +2591,24 @@ def se_hdrcombine(cat_cold:SourceCatalog, cat_hot:SourceCatalog,
                     verbose:bool=False) -> SegmentationImage:
     '''
     Combine the cold and hot segmentation images.
+    
+    Parameters
+    ----------
+    cat_cold : SourceCatalog
+        The cold source catalog.
+    cat_hot : SourceCatalog
+        The hot source catalog.
+    kron_params : list (default: [2.5, 1.4])
+        The parameters used for the AUTO photometry.
+    scale_factor : float (default: 1.1)
+        The scaling factor for expanding/shrinking the Kron apertures.
+    verbose : bool (default: False)
+        Print the progress if True.
+
+    Returns
+    -------
+    segm_combine : SegmentationImage
+        The combined segmentation image.
     '''
 
     kronmask = se_make_kronmask(cat_cold, kron_params=[kron_params[0]*scale_factor, kron_params[1]*scale_factor])
