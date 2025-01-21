@@ -9,7 +9,7 @@ from scipy.interpolate import interp1d
 from .sed_template import load_template
 from .utils import package_path
 from .utils_sed import convert_mJy_to_flam
-from .utils_constants import Lsun, Mpc2cm, cosmo
+from .utils_constants import Lsun, Mpc2cm, cosmo, ls_micron
 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -69,12 +69,14 @@ class SEDModel_single(object):
         self._priors = {}
         self._params_physical = {}
         self._parslicer = {}
+        self._params_log = []
         pslicer1, pslicer2 = 0, 0
         for mn, mp in self._model_dict.items():
             self._parnames += [f'{mn}:{pn}' for pn in mp._parnames]
             self._fix_params.update({f'{mn}:{pn}' : v for pn, v in mp._fix_params.items()})
             self._priors.update({f'{mn}:{pn}' : v for pn, v in mp._priors.items()})
             self._params_physical.update({f'{mn}:{pn}' : v for pn, v in mp._params_physical.items()})
+            self._params_log += [f'{mn}:{pn}' for pn in mp._params_log]
 
             # The parameter slicer
             pslicer1 = pslicer2
@@ -170,7 +172,7 @@ class SEDModel_single(object):
                                  if ((pn in mp._free_params) or (pn in mp._params_physical))})
         return params_label
 
-    def get_params_phy(self, params):
+    def get_params_phy(self, params, sft_dt=0.1, wavelim=(8, 1000)) -> dict:
         '''
         Get the physical parameters from the model.
         '''
@@ -179,7 +181,9 @@ class SEDModel_single(object):
             kwargs = dict(zip(mp._free_params, params[self._parslicer[mn]]))
 
             if mn == 'fsps_parametric':
-                pdict = mp.get_params_phy(**kwargs)
+                kwargs2 = dict(wavemin=wavelim[0], wavemax=wavelim[1], sfr_dt=sft_dt)
+                kwargs2.update(kwargs)
+                pdict = mp.get_params_phy(**kwargs2)
             elif mn == 'Cat3d_H_wind':
                 pdict = mp.get_params_phy(**kwargs)
             else:
@@ -265,6 +269,8 @@ class ComponentModel(object):
         self._params_label = []
         # The name of the physical parameters and their units
         self._params_physical = {}
+        # The parameters that should be in log space
+        self._params_log = []
 
         # Fixed parameters
         if fix_params is None:
@@ -325,8 +331,8 @@ class fsps_parametric(ComponentModel):
     '''
 
     def __init__(self, frame='obs', fix_params=None, zcontinuous=1, imf_type=1, 
-                 sfh=4, dust_type=2, add_dust_emission=True, priors=None, 
-                 verbose=True, **fsps_kwargs):
+                 sfh=4, dust_type=2, add_dust_emission=True, add_neb_emission=False, 
+                 priors=None, verbose=True, **fsps_kwargs):
         '''
         Parameters
         ----------
@@ -344,7 +350,8 @@ class fsps_parametric(ComponentModel):
             The SFH type.
             0: SSP; 1: tau model; 4: delayed tau model; 5: delayed tau model with burst.
         dust_type : int (default: 2)
-            The dust attenuation curve type. Default: Calzetti et al. (2000).
+            The dust attenuation curve type. Allow to choose 2 or 4.
+            2: Calzetti et al. (2000); 4: Kriek and Conroy 2013
         add_dust_emission : bool (default: True)
             Whether to add the dust emission.
         priors (optional) : dict
@@ -382,9 +389,9 @@ class fsps_parametric(ComponentModel):
         
         # Note that the parameters of FSPS are not the same as the parameters of the model
         self._fsps_params = ['zcontinuous', 'imf_type', 'sfh', 'dust_type', 
-                             'add_dust_emission', 'tage', 'logzsol', 'dust2', 
-                             'duste_gamma', 'duste_umin', 'duste_qpah', 'tau', 
-                             'const', 'tburst', 'fburst', 'sf_slope', 
+                             'add_dust_emission', 'tage', 'logzsol', 'dust1', 
+                             'dust2', 'duste_gamma', 'duste_umin', 'duste_qpah', 
+                             'tau', 'const', 'tburst', 'fburst', 'sf_slope', 
                              'sf_start', 'sf_trunc']
 
         self._fsps_kwargs = fsps_kwargs.copy()
@@ -393,6 +400,7 @@ class fsps_parametric(ComponentModel):
         self._fsps_kwargs['sfh'] = sfh
         self._fsps_kwargs['dust_type'] = dust_type
         self._fsps_kwargs['add_dust_emission'] = add_dust_emission
+        self._fsps_kwargs['add_neb_emission'] = add_neb_emission
         for k, v in fsps_kwargs.items():
             assert self._fsps_kwargs[k] == v, f'The input FSPS parameter ({k}) is not consistent!'
 
@@ -415,20 +423,29 @@ class fsps_parametric(ComponentModel):
             'sf_slope': r'$\alpha_\mathrm{SFH}$',
             'sf_start': r'$t_\mathrm{start}$',
             'sf_trunc': r'$t_\mathrm{trunc}$',
+            'gas_logu': r'$\log\,U_\mathrm{gas}$',
+            'gas_logz': r'$\log\,Z_\mathrm{gas}$',
             'logmstar': r'$\log\,(M_\star/M_\odot)$',
             'sfr': r'$\mathrm{SFR}$ ($M_\odot\,\mathrm{yr}^{-1}$)',
-            'A_V': r'$A_V$',
+            'A_V': r'$A_V$ (mag)',
             'logmdust': r'$\log\,(M_\mathrm{dust}/M_\odot)$',
+            'loglir': r'$\log\,(L_\mathrm{IR}/\mathrm{erg\,s^{-1}})$',
         }
         self._params_physical = {
             'logmstar': 'solMass',
             'sfr': 'solMass / yr',
             'A_V': 'None',
             'logmdust': 'solMass',
+            'loglir': 'erg / s',
         }
+        self._params_log = ['logMtot', 'logzsol', 'logmstar', 'logmdust', 
+                            'loglir', 'gas_logu', 'gas_logz']
 
         if self._fsps_kwargs['add_dust_emission']:
             self._parnames += ['duste_gamma', 'duste_umin', 'duste_qpah']
+        
+        if self._fsps_kwargs['add_neb_emission']:
+            self._parnames += ['gas_logu']  #, 'gas_logz' # The gas_logz is not used in the model for now for simplicity
 
         if self._fsps_kwargs['sfh'] in [1, 4]:
             self._parnames += ['tau', 'const', 'fage_burst', 'fburst', 'sf_start', 'sf_trunc']
@@ -438,6 +455,11 @@ class fsps_parametric(ComponentModel):
             self._parnames += ['tage']
         else:
             raise ValueError(f'The SFH type {self._fsps_kwargs["sfh"]} is not recognised!')
+        
+        if self._fsps_kwargs['dust_type'] == 4:
+            self._parnames += ['dust_ratio']
+            self._params_label['dust2'] = r'$\tau_{V, \mathrm{diffuse}}$'
+            self._params_label['dust_ratio'] = r'$\tau_{V, \mathrm{born}}/\tau_{V, \mathrm{diffuse}}$'
 
         self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
 
@@ -462,7 +484,7 @@ class fsps_parametric(ComponentModel):
         assert self._fsps_kwargs['zcontinuous'] in [1], 'The zcontinuous must be 1!'
         assert self._fsps_kwargs['imf_type'] in [0, 1, 2, 3, 4], 'The IMF type must be 0, 1, 2, 3, or 4!'
         assert self._fsps_kwargs['sfh'] in [0, 1, 4, 5], 'The SFH type must be 0, 1, 4, or 5!'
-        assert self._fsps_kwargs['dust_type'] in [2], 'Only allow Calzetti et al. (2000) attenuation curve for now!'
+        assert self._fsps_kwargs['dust_type'] in [2, 4], 'Only allow 2 and 4 for now!'
         assert (self._fsps_kwargs.get('zred', 0) == 0), 'The redshift must be 0!'
 
         assert isinstance(self._fix_params, dict), 'The fixed parameters must be a dictionary!'
@@ -470,6 +492,32 @@ class fsps_parametric(ComponentModel):
             assert pn in self._parnames, f'Parameter {pn} is not in the model parameter list!'
 
         assert self._priors['logzsol']['type'] == 'uniform', 'The prior of logzsol must be uniform!'
+
+    def cal_lir(self, params, wavemin=8.0, wavemax=1000.0):
+        '''
+        Calculate the IR luminosity.
+
+        Parameters
+        ----------
+        params : dict
+            The parameters.
+        wavemin : float (default: 8.0)
+            The minimum wavelength for the integration, units: micron.
+        wavemax : float (default: 1000.0)
+            The maximum wavelength for the integration, units: micron.
+
+        Returns
+        -------
+        lir : float
+            The IR luminosity, units: erg/s.
+        '''
+        wave, flux = self.__call__(**params)
+        freq = ls_micron / wave  # Hz
+        mask = (wave >= wavemin) & (wave <= wavemax)
+
+        # Convert mJy to erg/s/cm^2/Hz
+        lir = np.trapz(flux[mask][::-1] * 1e-26, x=freq[mask][::-1]) * 4 * np.pi * (params['DL'] * Mpc2cm)**2
+        return lir
 
     def complete_params(self, params):
         '''
@@ -532,7 +580,7 @@ class fsps_parametric(ComponentModel):
         else:
             return self._params_label.get(parname, None)
 
-    def get_params_phy(self, sfr_dt=0.1, **kwargs):
+    def get_params_phy(self, sfr_dt=0.1, wavemin=8.0, wavemax=1000.0, **kwargs):
         '''
         Get the physical parameters from the FSPS model.
         
@@ -554,6 +602,7 @@ class fsps_parametric(ComponentModel):
 
         if self._sps.params['add_dust_emission']:
             params_phy['logmdust'] = np.log10(self._sps.dust_mass * mass_total)
+            params_phy['loglir'] = np.log10(self.cal_lir(params, wavemin=wavemin, wavemax=wavemax))
         return params_phy
 
     def get_priors(self, **priors_input):
@@ -574,6 +623,7 @@ class fsps_parametric(ComponentModel):
             'sf_slope' : dict(type='uniform', low=-5, high=5),
             'fburst' : dict(type='uniform', low=0.0, high=1.0),
             'fage_burst' : dict(type='uniform', low=0.0, high=1.0),
+            'dust_ratio': dict(type='uniform', low=0.0, high=1.5),
             }
         
         priors = {}
@@ -615,6 +665,12 @@ class fsps_parametric(ComponentModel):
                 self._sps.params[pn] = params[pn]
             elif pn == 'fage_burst':
                 self._sps.params['tburst'] = params[pn] * params['tage']
+            elif pn == 'dust_ratio':
+                self._sps.params['dust1'] = params[pn] * params['dust2']
+        
+        if self._fsps_kwargs['add_neb_emission']:
+            # Tie the gas phase metallicity as recommended by FSPS
+            self._sps.params['gas_logz'] = self._sps.params['logzsol']
 
     def __call__(self, **kwargs):
         '''
@@ -717,6 +773,7 @@ class Cat3d_H_wind(ComponentModel):
 
         self._free_params = [pn for pn in self._parnames if pn not in self._fix_params]
         self._params_physical = {}
+        self._params_log = ['logL']
 
         if priors is None:
             self._priors_input = {}

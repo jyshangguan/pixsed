@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 from astropy import units
 from astropy.coordinates import SkyCoord
 from astropy.visualization import simple_norm
-from vorbin.voronoi_2d_binning import voronoi_2d_binning
+#from vorbin.voronoi_2d_binning import voronoi_2d_binning
 from astroquery.ipac.irsa.irsa_dust import IrsaDust
 import corner
 import dill as pickle
 import scipy.stats as scp_stats
 
-from sedpy.observate import load_filters
+from sedpy.observate import load_filters, getSED
 from prospect.utils.obsutils import fix_obs
 from prospect.models.templates import TemplateLibrary
 from prospect.models import SpecModel
@@ -168,6 +168,52 @@ def binmap_voronoi(image, error, mask, target_sn, pixelsize=1, cvt=True,
         ax.set_ylabel(r'S/N', fontsize=24)
         
     return bin_info, axs
+
+
+def template_to_SED(wave, flux, filters, wave_unit='micron', flux_unit='mJy', 
+                    linear_flux=True):
+    '''
+    Calculate the SED flux from the template.
+
+    Parameters
+    ----------
+    wave : 1D array
+        The wavelength of the template.
+    flux : 1D array
+        The flux density of the template.
+    filters : list
+        The list of the sedpy filters.
+    wave_unit : string (default: 'Angstrom')
+        The unit of the wavelength in 'Angstrom' or 'micron'.
+    flux_unit : string (default: 'mJy')
+        The unit of the flux density in 'mJy' or 'flam'.
+    linear_flux : bool (default: True)
+        The flux is linear if True, otherwise, it is logarithmic.
+    
+    Returns
+    -------
+    pwave : 1D array
+        The effective wavelength of the filters, units: micron.
+    phots : 1D array
+        The photometry of the filters, units: mJy.
+    '''
+    if wave_unit == 'Angstrom':
+        wave_aa = wave
+    elif wave_unit == 'micron':
+        wave_aa = wave * 1e4
+    else:
+        raise ValueError(f'Cannot recognize the wavelength unit ({wave_unit})!')
+    
+    if flux_unit == 'mJy':
+        flam = convert_mJy_to_flam(wave_aa, flux)
+    elif flux_unit == 'flam':
+        flam = flux
+    else:
+        raise ValueError(f'Cannot recognize the flux unit ({flux_unit})!')
+    
+    pwave = np.array([f.wave_effective for f in filters]) / 1e4  # micron
+    phots = getSED(wave_aa, flam, filters, linear_flux=linear_flux) * 3.631e6  # mJy
+    return pwave, phots
 
 
 def fit_SED_Prospector(bands, maggies, maggies_unc, redshift, lumdist=None, 
